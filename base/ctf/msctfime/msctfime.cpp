@@ -1132,7 +1132,8 @@ DllMain(
         }
         case DLL_PROCESS_DETACH:
         {
-            ProcessDetach(hinstDLL);
+            if (!lpvReserved)
+                ProcessDetach(hinstDLL);
             break;
         }
         case DLL_THREAD_DETACH:
