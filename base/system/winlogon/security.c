@@ -39,6 +39,39 @@
 /* GLOBALS ******************************************************************/
 
 static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+static SID_IDENTIFIER_AUTHORITY MandatoryLabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+
+static
+PACL
+CreateLowIntegritySacl(VOID)
+{
+    PSID LowSid = NULL;
+    PACL Sacl = NULL;
+    DWORD SaclSize;
+
+    if (!AllocateAndInitializeSid(&MandatoryLabelAuthority,
+                                  1,
+                                  SECURITY_MANDATORY_LOW_RID,
+                                  0, 0, 0, 0, 0, 0, 0,
+                                  &LowSid))
+    {
+        return NULL;
+    }
+
+    SaclSize = sizeof(ACL) +
+               FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + GetLengthSid(LowSid);
+    Sacl = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, SaclSize);
+    if (Sacl != NULL &&
+        (!InitializeAcl(Sacl, SaclSize, ACL_REVISION) ||
+         !AddMandatoryAce(Sacl, ACL_REVISION, 0, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, LowSid)))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sacl);
+        Sacl = NULL;
+    }
+
+    FreeSid(LowSid);
+    return Sacl;
+}
 
 /* FUNCTIONS ****************************************************************/
 
@@ -120,6 +153,7 @@ CreateWinstaSecurity(
     PSID WinlogonSid = NULL, AdminsSid = NULL, NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment below for information */
     DWORD DaclSize;
     PACL Dacl = NULL;
+    PACL Sacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -298,6 +332,13 @@ CreateWinstaSecurity(
         goto Quit;
     }
 
+    Sacl = CreateLowIntegritySacl();
+    if (Sacl == NULL || !SetSecurityDescriptorSacl(&AbsoluteSd, TRUE, Sacl, FALSE))
+    {
+        ERR("CreateWinstaSecurity(): Failed to set up the integrity label (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
     /* Convert it to self-relative format */
     RelativeSd = ConvertToSelfRelative(&AbsoluteSd);
     if (RelativeSd == NULL)
@@ -331,6 +372,11 @@ Quit:
     if (Dacl != NULL)
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
+    }
+
+    if (Sacl != NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sacl);
     }
 
     if (Success == FALSE)
@@ -367,6 +413,7 @@ CreateApplicationDesktopSecurity(
     PSID WinlogonSid = NULL, AdminsSid = NULL, NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment in CreateWinstaSecurity for information */
     DWORD DaclSize;
     PACL Dacl = NULL;
+    PACL Sacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -477,6 +524,13 @@ CreateApplicationDesktopSecurity(
         goto Quit;
     }
 
+    Sacl = CreateLowIntegritySacl();
+    if (Sacl == NULL || !SetSecurityDescriptorSacl(&AbsoluteSd, TRUE, Sacl, FALSE))
+    {
+        ERR("CreateApplicationDesktopSecurity(): Failed to set up the integrity label (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
     /* Conver it to self-relative format */
     RelativeSd = ConvertToSelfRelative(&AbsoluteSd);
     if (RelativeSd == NULL)
@@ -510,6 +564,11 @@ Quit:
     if (Dacl != NULL)
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
+    }
+
+    if (Sacl != NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sacl);
     }
 
     if (Success == FALSE)
