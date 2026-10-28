@@ -344,7 +344,7 @@ system_fallback_config[] =
     { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK SC", L"zh-Hans" },
     { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK TC", L"zh-Hant" },
     { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK KR", L"ko" },
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK JP" },
+    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK JP, Noto Sans JP" },
 
     /* CJK Unified Ext A - 3400-4DBF
        CJK Unified       - 4E00-9FFF */
@@ -352,7 +352,7 @@ system_fallback_config[] =
     { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK SC", L"zh-Hans" },
     { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK TC", L"zh-Hant" },
     { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK KR", L"ko" },
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK JP" },
+    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK JP, Noto Sans JP" },
 
     { "A000-A4CF",              L"Noto Sans Yi" },
     { "A4D0-A4FF",              L"Noto Sans Lisu" },
@@ -371,7 +371,7 @@ system_fallback_config[] =
     { "F900-FAFF",              L"Noto Sans CJK SC", L"zh-Hans" },
     { "F900-FAFF",              L"Noto Sans CJK TC", L"zh-Hant" },
     { "F900-FAFF",              L"Noto Sans CJK KR", L"ko" },
-    { "F900-FAFF",              L"Noto Sans CJK JP" },
+    { "F900-FAFF",              L"Noto Sans CJK JP, Noto Sans JP" },
 
     /* Vertical Forms - FE10-FE1F */
 
@@ -384,14 +384,14 @@ system_fallback_config[] =
 
     { "FE30-FE6F",              L"Noto Sans CJK SC", L"zh-Hans" },
     { "FE30-FE6F",              L"Noto Sans CJK KR", L"ko" },
-    { "FE30-FE6F",              L"Noto Sans CJK JP", L"ja" },
+    { "FE30-FE6F",              L"Noto Sans CJK JP, Noto Sans JP", L"ja" },
     { "FE30-FE6F",              L"Noto Sans CJK TC" },
 
     /* Halfwidth and Fullwidth Forms */
     { "FF00-FFEF",              L"Noto Sans CJK SC", L"zh-Hans" },
     { "FF00-FFEF",              L"Noto Sans CJK TC", L"zh-Hant" },
     { "FF00-FFEF",              L"Noto Sans CJK KR", L"ko" },
-    { "FF00-FFEF",              L"Noto Sans CJK JP" },
+    { "FF00-FFEF",              L"Noto Sans CJK JP, Noto Sans JP" },
 
     { "1F800-1F8FF",            L"Noto Sans Symbols2, Noto Sans Symbols 2" },
 };
