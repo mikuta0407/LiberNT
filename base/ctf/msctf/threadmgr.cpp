@@ -1060,25 +1060,29 @@ HRESULT CThreadMgr::DispatchKey(WPARAM wParam, LPARAM lParam, BOOL *pfEaten, BOO
             !MatchPreservedKeyModifiers(key->prekey.uModifiers))
             continue;
 
-        *pfEaten = TRUE;
-        if (test)
-            return S_OK;
-
         ITfKeyEventSink *owner = NULL;
         get_textservice_sink(key->tid, IID_ITfKeyEventSink, (IUnknown **)&owner);
         if (!owner)
+            continue;
+
+        ITfContext *context = NULL;
+        if (FAILED(m_focus->GetTop(&context)) || !context)
             return S_OK;
 
+        if (test)
+        {
+            context->Release();
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+
         GUID guid = key->guid;
-        ITfContext *context = NULL;
+        BOOL fEaten = FALSE;
         AddRef();
         owner->AddRef();
-        if (SUCCEEDED(m_focus->GetTop(&context)) && context)
-        {
-            BOOL fEaten = FALSE;
-            owner->OnPreservedKey(context, guid, &fEaten);
-            context->Release();
-        }
+        owner->OnPreservedKey(context, guid, &fEaten);
+        *pfEaten = fEaten;
+        context->Release();
         owner->Release();
         Release();
         return S_OK;

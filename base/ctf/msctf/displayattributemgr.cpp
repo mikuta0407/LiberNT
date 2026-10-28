@@ -180,8 +180,8 @@ HRESULT CDisplayAttributeMgr::_LoadProviders()
             continue;
 
         ITfDisplayAttributeProvider *provider = NULL;
-        HRESULT hr = CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, IID_ITfDisplayAttributeProvider,
-                                      (void **)&provider);
+        HRESULT hr = cicCoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, IID_ITfDisplayAttributeProvider,
+                                         (void **)&provider);
         if (FAILED(hr))
         {
             WARN("provider %s: 0x%lx\n", debugstr_guid(&clsid), hr);

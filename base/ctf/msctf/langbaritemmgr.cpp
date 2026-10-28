@@ -249,11 +249,17 @@ private:
     DWORD m_nextCookie;
 };
 
+class CLangBarItemMgr;
+
+static SRWLOCK s_LangBarItemMgrLock = SRWLOCK_INIT;
+static CLangBarItemMgr *s_pLangBarItemMgrs = NULL;
+
 class CLangBarItemMgr final : public ITfLangBarItemMgr
 {
 public:
     CLangBarItemMgr()
         : m_refs(1), m_items(NULL), m_cItems(0), m_sinks(NULL), m_cSinks(0), m_nextCookie(1)
+        , m_dwThreadId(GetCurrentThreadId()), m_pNext(NULL)
     {
     }
 
@@ -271,10 +277,47 @@ public:
     STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_refs); }
     STDMETHODIMP_(ULONG) Release() override
     {
+        AcquireSRWLockExclusive(&s_LangBarItemMgrLock);
         ULONG refs = InterlockedDecrement(&m_refs);
+        if (!refs)
+        {
+            for (CLangBarItemMgr **pp = &s_pLangBarItemMgrs; *pp; pp = &(*pp)->m_pNext)
+            {
+                if (*pp == this)
+                {
+                    *pp = m_pNext;
+                    break;
+                }
+            }
+        }
+        ReleaseSRWLockExclusive(&s_LangBarItemMgrLock);
         if (!refs)
             delete this;
         return refs;
+    }
+
+    static CLangBarItemMgr *FindForCurrentThread()
+    {
+        CLangBarItemMgr *pMgr;
+        AcquireSRWLockExclusive(&s_LangBarItemMgrLock);
+        for (pMgr = s_pLangBarItemMgrs; pMgr; pMgr = pMgr->m_pNext)
+        {
+            if (pMgr->m_dwThreadId == GetCurrentThreadId())
+            {
+                pMgr->AddRef();
+                break;
+            }
+        }
+        ReleaseSRWLockExclusive(&s_LangBarItemMgrLock);
+        return pMgr;
+    }
+
+    void Register()
+    {
+        AcquireSRWLockExclusive(&s_LangBarItemMgrLock);
+        m_pNext = s_pLangBarItemMgrs;
+        s_pLangBarItemMgrs = this;
+        ReleaseSRWLockExclusive(&s_LangBarItemMgrLock);
     }
 
     STDMETHODIMP EnumItems(IEnumTfLangBarItems **ppEnum) override
@@ -498,6 +541,8 @@ private:
     LangBarItemSinkEntry *m_sinks;
     ULONG m_cSinks;
     DWORD m_nextCookie;
+    DWORD m_dwThreadId;
+    CLangBarItemMgr *m_pNext;
 };
 
 EXTERN_C
@@ -505,7 +550,9 @@ HRESULT LangBarItemMgr_Constructor(ITfLangBarItemMgr **ppOut)
 {
     if (!ppOut)
         return E_INVALIDARG;
-    *ppOut = NULL;
+    *ppOut = CLangBarItemMgr::FindForCurrentThread();
+    if (*ppOut)
+        return S_OK;
     CLangBarItemMgr *pMgr = new(cicNoThrow) CLangBarItemMgr();
     if (!pMgr)
         return E_OUTOFMEMORY;
@@ -515,6 +562,7 @@ HRESULT LangBarItemMgr_Constructor(ITfLangBarItemMgr **ppOut)
         pMgr->AddItem(pHelp);
         pHelp->Release();
     }
+    pMgr->Register();
     *ppOut = pMgr;
     return S_OK;
 }

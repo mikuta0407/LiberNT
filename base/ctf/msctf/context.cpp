@@ -1247,7 +1247,7 @@ STDMETHODIMP CContext::OnLockGranted(_In_ DWORD dwLockFlags)
     AddRef();
     m_lockFlags = dwLockFlags & TS_LF_READWRITE;
 
-    if (m_currentEditSession)
+    if (m_currentEditSession && (m_lockFlags & m_currentLock) == m_currentLock)
     {
         ITfEditSession *session = m_currentEditSession;
         TfClientId tid = m_currentTid;
@@ -1256,7 +1256,7 @@ STDMETHODIMP CContext::OnLockGranted(_In_ DWORD dwLockFlags)
         session->Release();
     }
 
-    while (m_cPending && (m_lockFlags & m_pending[0].lock) == m_pending[0].lock)
+    while (!m_currentEditSession && m_cPending && (m_lockFlags & m_pending[0].lock) == m_pending[0].lock)
     {
         PendingSession item = m_pending[0];
         MoveMemory(&m_pending[0], &m_pending[1], (m_cPending - 1) * sizeof(*m_pending));
@@ -1634,6 +1634,13 @@ HRESULT CContext::TerminateOne(CComposition *composition)
         else
             hr = RequestEditSession(m_tidOwner, session, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
         session->Release();
+        if (SUCCEEDED(hr) && FAILED(hrSession))
+            hr = hrSession;
+        if (FAILED(hr))
+        {
+            composition->Release();
+            return hr;
+        }
     }
     if (composition->IsActive())
     {

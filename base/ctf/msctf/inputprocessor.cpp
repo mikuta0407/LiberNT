@@ -653,7 +653,8 @@ STDMETHODIMP CInputProcessorProfiles::EnableLanguageProfile(
     return S_OK;
 }
 
-STDMETHODIMP CInputProcessorProfiles::IsEnabledLanguageProfile(
+static HRESULT
+get_language_profile_enabled(
     _In_ REFCLSID rclsid,
     _In_ LANGID langid,
     _In_ REFGUID guidProfile,
@@ -662,37 +663,48 @@ STDMETHODIMP CInputProcessorProfiles::IsEnabledLanguageProfile(
     HKEY key;
     WCHAR buf[39], buf2[39], fullkey[168];
     LSTATUS error;
-
-    TRACE("(%p) %s, %i, %s, %p\n", this, debugstr_guid(&rclsid), langid, debugstr_guid(&guidProfile), pfEnable);
-
-    if (!pfEnable)
-        return E_INVALIDARG;
+    DWORD dwEnable, count;
 
     StringFromGUID2(rclsid, buf, _countof(buf));
     StringFromGUID2(guidProfile, buf2, _countof(buf2));
     StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s", szwSystemTIPKey,
                      buf, L"LanguageProfile", langid, buf2);
 
-    error = RegOpenKeyExW(HKEY_CURRENT_USER, fullkey, 0, KEY_READ | KEY_WRITE, &key);
+    error = RegOpenKeyExW(HKEY_CURRENT_USER, fullkey, 0, KEY_READ, &key);
     if (error == ERROR_SUCCESS)
     {
-        DWORD count = sizeof(DWORD);
-        error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)pfEnable, &count);
+        count = sizeof(dwEnable);
+        error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)&dwEnable, &count);
         RegCloseKey(key);
-    }
-
-    if (error != ERROR_SUCCESS) /* Try Default */
-    {
-        error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullkey, 0, KEY_READ | KEY_WRITE, &key);
         if (error == ERROR_SUCCESS)
         {
-            DWORD count = sizeof(DWORD);
-            error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)pfEnable, &count);
-            RegCloseKey(key);
+            *pfEnable = (dwEnable != 0);
+            return S_OK;
         }
     }
 
-    return (error == ERROR_SUCCESS) ? S_OK : E_FAIL;
+    error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullkey, 0, KEY_READ, &key);
+    if (error != ERROR_SUCCESS)
+        return E_FAIL;
+    count = sizeof(dwEnable);
+    error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)&dwEnable, &count);
+    RegCloseKey(key);
+    *pfEnable = (error != ERROR_SUCCESS) || (dwEnable != 0);
+    return S_OK;
+}
+
+STDMETHODIMP CInputProcessorProfiles::IsEnabledLanguageProfile(
+    _In_ REFCLSID rclsid,
+    _In_ LANGID langid,
+    _In_ REFGUID guidProfile,
+    _Out_ BOOL *pfEnable)
+{
+    TRACE("(%p) %s, %i, %s, %p\n", this, debugstr_guid(&rclsid), langid, debugstr_guid(&guidProfile), pfEnable);
+
+    if (!pfEnable)
+        return E_INVALIDARG;
+
+    return get_language_profile_enabled(rclsid, langid, guidProfile, pfEnable);
 }
 
 STDMETHODIMP CInputProcessorProfiles::EnableLanguageProfileByDefault(
@@ -1395,7 +1407,10 @@ find_user_input_method(_In_ LANGID langid, _Out_ CLSID *pclsid, _Out_ GUID *pgui
         for (DWORD value = 0;; ++value)
         {
             DWORD cchName = _countof(name), type, order, cbOrder = sizeof(order);
-            if (RegEnumValueW(hLang, value, name, &cchName, NULL, &type, (LPBYTE)&order, &cbOrder) != ERROR_SUCCESS)
+            LSTATUS error = RegEnumValueW(hLang, value, name, &cchName, NULL, &type, (LPBYTE)&order, &cbOrder);
+            if (error == ERROR_MORE_DATA)
+                continue;
+            if (error != ERROR_SUCCESS)
                 break;
             if (type != REG_DWORD || _wcsnicmp(name, prefix, 5) || order >= bestOrder)
                 continue;
@@ -1421,15 +1436,9 @@ HRESULT activate_default_textservice(LANGID langid)
     if (!find_user_input_method(langid, &clsid, &guidProfile))
         return S_FALSE;
 
-    WCHAR buf[39], buf2[39], fullkey[168];
-    StringFromGUID2(clsid, buf, _countof(buf));
-    StringFromGUID2(guidProfile, buf2, _countof(buf2));
-    StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\LanguageProfile\\0x%08x\\%s", szwSystemTIPKey, buf,
-                     langid, buf2);
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullkey, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+    BOOL fEnabled;
+    if (FAILED(get_language_profile_enabled(clsid, langid, guidProfile, &fEnabled)) || !fEnabled)
         return S_FALSE;
-    RegCloseKey(hKey);
 
     TRACE("activating %s %s for %04x\n", debugstr_guid(&clsid), debugstr_guid(&guidProfile), langid);
     ZeroMemory(&profile, sizeof(profile));
