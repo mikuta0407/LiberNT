@@ -2125,6 +2125,37 @@ GetProfileListImagePath(
 }
 
 
+static
+VOID
+CreateLocalLowDirectory(
+    _In_ LPCWSTR lpHivePath)
+{
+    WCHAR szPath[MAX_PATH];
+    PSECURITY_DESCRIPTOR pSecurityDescriptor = NULL;
+    LPWSTR pszSeparator;
+
+    if (FAILED(StringCbCopyW(szPath, sizeof(szPath), lpHivePath)))
+        return;
+    pszSeparator = wcsrchr(szPath, L'\\');
+    if (!pszSeparator)
+        return;
+    *pszSeparator = UNICODE_NULL;
+    if (FAILED(StringCbCatW(szPath, sizeof(szPath), L"\\AppData\\LocalLow")))
+        return;
+
+    if (!CreateDirectoryW(szPath, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return;
+
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;OICI;NW;;;LW)", SDDL_REVISION_1,
+                                                             &pSecurityDescriptor, NULL))
+    {
+        if (!SetFileSecurityW(szPath, LABEL_SECURITY_INFORMATION, pSecurityDescriptor))
+            DPRINT1("SetFileSecurityW(%S) failed (Error %lu)\n", szPath, GetLastError());
+        LocalFree(pSecurityDescriptor);
+    }
+}
+
+
 BOOL
 WINAPI
 LoadUserProfileW(
@@ -2308,6 +2339,8 @@ LoadUserProfileW(
             DPRINT1("RegLoadKeyW() failed (Error %ld)\n", dwError);
             goto cleanup;
         }
+
+        CreateLocalLowDirectory(szUserHivePath);
 
         if (bNewProfile)
         {
