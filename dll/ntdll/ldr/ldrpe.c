@@ -1399,6 +1399,9 @@ FailurePath:
             /* Get the Import and Forwarder Names */
             ImportName = (LPSTR)Thunk->u1.Function;
 
+            if (!DllPath)
+                DllPath = LdrpGetModuleLoadPath(ExportBase);
+
             DotPosition = strchr(ImportName, '.');
             ASSERT(DotPosition != NULL);
             if (!DotPosition)
