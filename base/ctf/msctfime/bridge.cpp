@@ -241,12 +241,8 @@ CicBridge::SelectEx(
 
     if (fSelect)
     {
-        ITfInputProcessorProfiles *pProfiles = NULL;
-        if (SUCCEEDED(TF_CreateInputProcessorProfiles(&pProfiles)))
-        {
-            pProfiles->ChangeCurrentLanguage(LOWORD(hKL));
-            pProfiles->Release();
-        }
+        if (pTLS->m_pProfile)
+            pTLS->m_pProfile->ChangeCurrentLanguage(LOWORD(hKL));
         if (pCicIC)
             pCicIC->m_bCandidateOpen = FALSE;
         if (imcLock.get().fOpen)
