@@ -860,7 +860,6 @@ static HFONT select_font_config( struct console_config *config, unsigned int cp,
 {
     HFONT font, old_font;
     TEXTMETRICW tm;
-    CPINFO cpinfo;
     HDC dc;
 
     if (!(dc = GetDC( hwnd ))) return NULL;
@@ -879,10 +878,6 @@ static HFONT select_font_config( struct console_config *config, unsigned int cp,
     config->cell_height = tm.tmHeight + tm.tmExternalLeading;
     config->font_weight = tm.tmWeight;
     lstrcpyW( config->face_name, lf->lfFaceName );
-
-    /* FIXME: use maximum width for DBCS codepages since some chars take two cells */
-    if (GetCPInfo( cp, &cpinfo ) && cpinfo.MaxCharSize == 2)
-        config->cell_width  = tm.tmMaxCharWidth;
 
     return font;
 }
@@ -914,7 +909,6 @@ static BOOL set_console_font( struct console *console, const LOGFONTW *logfont )
     HFONT font, old_font;
     TEXTMETRICW tm;
     WCHAR face_name[LF_FACESIZE];
-    CPINFO cpinfo;
     HDC dc;
 
     TRACE( "%s\n", debugstr_logfont( logfont, 0 ));
@@ -951,10 +945,6 @@ static BOOL set_console_font( struct console *console, const LOGFONTW *logfont )
     free( font_info->face_name );
     font_info->face_name = malloc( font_info->face_len * sizeof(WCHAR) );
     memcpy( font_info->face_name, face_name, font_info->face_len * sizeof(WCHAR) );
-
-    /* FIXME: use maximum width for DBCS codepages since some chars take two cells */
-    if (GetCPInfo( console->output_cp, &cpinfo ) && cpinfo.MaxCharSize == 2)
-        font_info->width  = tm.tmMaxCharWidth;
 
     if (console->window->font) DeleteObject( console->window->font );
     console->window->font = font;
