@@ -154,6 +154,7 @@ Inquire(
         }
     }
 
+    lpIMEInfo->fdwProperty |= IME_PROP_UNICODE;
     return S_OK;
 }
 
