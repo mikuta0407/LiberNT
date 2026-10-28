@@ -846,6 +846,21 @@ interface ITfDisplayAttributeMgr : IUnknown
 }
 
 [
+    object,
+    local,
+    uuid(fee47777-163c-4769-996a-6e9c50ad8f54),
+    pointer_default(unique)
+]
+interface ITfDisplayAttributeProvider : IUnknown
+{
+    HRESULT EnumDisplayAttributeInfo([out] IEnumTfDisplayAttributeInfo **ppEnum);
+
+    HRESULT GetDisplayAttributeInfo(
+            [in] REFGUID guid,
+            [out] ITfDisplayAttributeInfo **ppInfo);
+}
+
+[
   object,
   local,
   uuid(c3acefb5-f69d-4905-938f-fcadcf4be830),
