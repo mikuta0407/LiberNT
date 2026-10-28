@@ -336,7 +336,6 @@ CreateWinstaSecurity(
     if (Sacl == NULL || !SetSecurityDescriptorSacl(&AbsoluteSd, TRUE, Sacl, FALSE))
     {
         ERR("CreateWinstaSecurity(): Failed to set up the integrity label (error code %lu)\n", GetLastError());
-        goto Quit;
     }
 
     /* Convert it to self-relative format */
@@ -528,7 +527,6 @@ CreateApplicationDesktopSecurity(
     if (Sacl == NULL || !SetSecurityDescriptorSacl(&AbsoluteSd, TRUE, Sacl, FALSE))
     {
         ERR("CreateApplicationDesktopSecurity(): Failed to set up the integrity label (error code %lu)\n", GetLastError());
-        goto Quit;
     }
 
     /* Conver it to self-relative format */
