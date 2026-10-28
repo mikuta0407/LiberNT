@@ -238,8 +238,11 @@ AddUserProfileEntry(_In_ const LAYOUT_OR_TIP *pEntry, _In_ BOOL bDefault)
         {
             WCHAR szValue[MAX_PATH];
             DWORD cchValue = _countof(szValue), dwType, dwData, cbData = sizeof(dwData);
-            if (RegEnumValueW(hLang, dwIndex, szValue, &cchValue, NULL, &dwType, (LPBYTE)&dwData,
-                              &cbData) != ERROR_SUCCESS)
+            LSTATUS status = RegEnumValueW(hLang, dwIndex, szValue, &cchValue, NULL, &dwType, (LPBYTE)&dwData,
+                                           &cbData);
+            if (status == ERROR_MORE_DATA)
+                continue;
+            if (status != ERROR_SUCCESS)
                 break;
             if (dwType == REG_DWORD && dwData > dwOrder)
                 dwOrder = dwData;
