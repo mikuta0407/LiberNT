@@ -413,6 +413,12 @@ static void deactivate_remove_conflicting_ts(REFCLSID catid)
 }
 
 EXTERN_C
+void deactivate_textservice_by_category(REFGUID catid)
+{
+    deactivate_remove_conflicting_ts(catid);
+}
+
+EXTERN_C
 HRESULT add_active_textservice(TF_LANGUAGEPROFILE *lp)
 {
     ActivatedTextService *actsvr;
@@ -521,7 +527,7 @@ HRESULT activate_textservices(ITfThreadMgrEx *tm)
     {
         hr = activate_given_ts(ats->ats, tm);
         if (FAILED(hr))
-            FIXME("Failed to activate text service\n");
+            FIXME("Failed to activate text service %s: 0x%lx\n", debugstr_guid(&ats->ats->LanguageProfile.clsid), hr);
     }
     return hr;
 }
@@ -738,8 +744,6 @@ HRESULT WINAPI TF_CreateLangBarMgr(ITfLangBarMgr **pppbm)
  */
 HRESULT WINAPI TF_CreateLangBarItemMgr(ITfLangBarItemMgr **pplbim)
 {
-    FIXME("stub %p\n", pplbim);
-    *pplbim = NULL;
-
-    return E_NOTIMPL;
+    TRACE("%p\n", pplbim);
+    return LangBarItemMgr_Constructor(pplbim);
 }
