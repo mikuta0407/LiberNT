@@ -6784,10 +6784,6 @@ GetFontPenalty(const LOGFONTW *               LogFont,
     ASSERT(Otm);
     ASSERT(LogFont);
 
-    BOOL fFaceNameMatch = LogFont->lfFaceName[0] != UNICODE_NULL &&
-        (_wcsicmp(LogFont->lfFaceName, (WCHAR*)((ULONG_PTR)Otm + (ULONG_PTR)Otm->otmpFamilyName)) == 0 ||
-         _wcsicmp(LogFont->lfFaceName, (WCHAR*)((ULONG_PTR)Otm + (ULONG_PTR)Otm->otmpFaceName)) == 0);
-
     /* FIXME: IntSizeSynth Penalty 20 */
     /* FIXME: SmallPenalty Penalty 1 */
     /* FIXME: FaceNameSubst Penalty 500 */
@@ -6851,7 +6847,10 @@ GetFontPenalty(const LOGFONTW *               LogFont,
         Byte = VARIABLE_PITCH;
     if (Byte == FIXED_PITCH)
     {
-        if ((TM->tmPitchAndFamily & _TMPF_VARIABLE_PITCH) && !fFaceNameMatch)
+        if ((TM->tmPitchAndFamily & _TMPF_VARIABLE_PITCH) &&
+            (LogFont->lfFaceName[0] == UNICODE_NULL ||
+             (_wcsicmp(LogFont->lfFaceName, (WCHAR*)((ULONG_PTR)Otm + (ULONG_PTR)Otm->otmpFamilyName)) != 0 &&
+              _wcsicmp(LogFont->lfFaceName, (WCHAR*)((ULONG_PTR)Otm + (ULONG_PTR)Otm->otmpFaceName)) != 0)))
         {
             /* FixedPitch Penalty 15000 */
             /* Requested a fixed pitch font, but the candidate is a
