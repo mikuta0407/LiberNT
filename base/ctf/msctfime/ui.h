@@ -205,6 +205,7 @@ public:
     void Update(HIMC hIMC);
     void Hide();
     void SetAllowed(BOOL bAllowed);
+    static BOOL GetVisibleRect(_Out_ RECT *prc);
 
 private:
     BOOL EnsureWindow();

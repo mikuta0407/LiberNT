@@ -688,6 +688,9 @@ HRESULT CicInputContext::GetTextExt(_Out_ RECT *prc, _Out_ BOOL *pfClipped)
     *pfClipped = FALSE;
     SetRectEmpty(prc);
 
+    if (CCompositionWindow::GetVisibleRect(prc))
+        return S_OK;
+
     CicIMCLock imcLock(m_hIMC);
     if (FAILED(imcLock.m_hr))
         return imcLock.m_hr;
@@ -696,8 +699,23 @@ HRESULT CicInputContext::GetTextExt(_Out_ RECT *prc, _Out_ BOOL *pfClipped)
     POINT pt = { 0, 0 };
     LONG height = 0;
 
-    if (imcLock.get().lfFont.W.lfHeight)
-        height = labs(imcLock.get().lfFont.W.lfHeight);
+    if (imcLock.get().lfFont.W.lfFaceName[0] || imcLock.get().lfFont.W.lfHeight)
+    {
+        HFONT hFont = CreateFontIndirectW(&imcLock.get().lfFont.W);
+        HDC hDC = GetDC(hWnd);
+        if (hFont && hDC)
+        {
+            TEXTMETRICW tm;
+            HGDIOBJ hOldFont = SelectObject(hDC, hFont);
+            if (GetTextMetricsW(hDC, &tm))
+                height = tm.tmHeight;
+            SelectObject(hDC, hOldFont);
+        }
+        if (hDC)
+            ReleaseDC(hWnd, hDC);
+        if (hFont)
+            DeleteObject(hFont);
+    }
 
     if (imcLock.get().cfCompForm.dwStyle & (CFS_POINT | CFS_FORCE_POSITION | CFS_RECT))
     {

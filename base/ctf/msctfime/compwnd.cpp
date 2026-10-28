@@ -64,6 +64,17 @@ void CCompositionWindow::Hide()
         ::ShowWindow(m_hWnd, SW_HIDE);
 }
 
+BOOL CCompositionWindow::GetVisibleRect(_Out_ RECT *prc)
+{
+    HWND hWnd = NULL;
+    while ((hWnd = ::FindWindowExW(NULL, hWnd, COMPWND_CLASS, NULL)) != NULL)
+    {
+        if (::GetWindowThreadProcessId(hWnd, NULL) == ::GetCurrentThreadId() && ::IsWindowVisible(hWnd))
+            return ::GetWindowRect(hWnd, prc);
+    }
+    return FALSE;
+}
+
 void CCompositionWindow::SetAllowed(BOOL bAllowed)
 {
     m_bAllowed = bAllowed;
