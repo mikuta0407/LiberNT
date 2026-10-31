@@ -6752,7 +6752,7 @@ InstallRawNullDriver(
         RegType != REG_DWORD ||
         !(Capabilities & CM_DEVCAP_RAWDEVICEOK))
     {
-        SetLastError(ERROR_NO_DRIVER_SELECTED);
+        SetLastError(ERROR_NO_ASSOCIATED_SERVICE);
         return FALSE;
     }
 
