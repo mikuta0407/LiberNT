@@ -11854,6 +11854,7 @@ DxgkpAcquirePostDisplayOwnership(
     ULONGLONG                    GopQueryUs = 0;
     ULONGLONG                    StepStart100ns;
     BOOLEAN                      ReleasedByDriver = FALSE;
+    BOOLEAN                      PostDevice;
     NTSTATUS                     Status = STATUS_SUCCESS;
 
     PAGED_CODE();
@@ -11876,14 +11877,13 @@ DxgkpAcquirePostDisplayOwnership(
     RtlZeroMemory(&ReleasedDisplayInformation,
                   sizeof(ReleasedDisplayInformation));
 
-    if (!DxgkpIsPostDisplayDevice(Claimant))
+    PostDevice = DxgkpIsPostDisplayDevice(Claimant);
+    if (!PostDevice)
     {
         DXGKRNL_INFO("DxgkCbAcquirePostDisplayOwnership: adapter %p is not the "
                      "POST device; it gets an empty descriptor\n",
                      Claimant);
         DisplayInformation->TargetId = D3DDDI_ID_UNINITIALIZED;
-        ExReleaseRundownProtection(&Claimant->ReverseCallbackRundownRef);
-        return STATUS_SUCCESS;
     }
 
     (VOID)KeWaitForSingleObject(&g_PostDisplayOwnershipMutex, Executive, KernelMode, FALSE, NULL);
@@ -11908,7 +11908,9 @@ DxgkpAcquirePostDisplayOwnership(
                 Claimant->MiniportContext != NULL &&
                 !Claimant->IsBasicDisplayFallback &&
                 Owner->MiniportContext != NULL &&
-                Owner->IsBasicDisplayFallback;
+                Owner->IsBasicDisplayFallback &&
+                (PostDevice ||
+                 !DxgkAdapterHasMemoryResources(Owner->TranslatedResources));
             if (!RetainFallback)
             {
                 DXGKRNL_TRACE("DxgkCbAcquirePostDisplayOwnership: boot display "
@@ -11943,9 +11945,18 @@ DxgkpAcquirePostDisplayOwnership(
                 goto Complete;
             }
         }
+        else if (!PostDevice)
+        {
+            if (OwnerDeviceObject != NULL)
+                ObDereferenceObject(OwnerDeviceObject);
+            goto Complete;
+        }
         if (OwnerDeviceObject != NULL)
             ObDereferenceObject(OwnerDeviceObject);
     }
+
+    if (!PostDevice)
+        goto TransferOwnership;
 
     if (ReleasedByDriver)
     {
