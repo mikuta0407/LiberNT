@@ -1200,6 +1200,72 @@ LdrpCreateDllSectionRedirected(IN PUNICODE_STRING FullName,
     return Status;
 }
 
+typedef struct _LDRP_MODULE_LOAD_PATH
+{
+    struct _LDRP_MODULE_LOAD_PATH *Next;
+    PVOID DllBase;
+    WCHAR Path[ANYSIZE_ARRAY];
+} LDRP_MODULE_LOAD_PATH, *PLDRP_MODULE_LOAD_PATH;
+
+static PLDRP_MODULE_LOAD_PATH LdrpModuleLoadPaths;
+
+static
+VOID
+LdrpRecordModuleLoadPath(
+    _In_ PVOID DllBase,
+    _In_ PCWSTR Path)
+{
+    PLDRP_MODULE_LOAD_PATH Record;
+    SIZE_T Length = wcslen(Path);
+
+    Record = RtlAllocateHeap(LdrpHeap,
+                             0,
+                             FIELD_OFFSET(LDRP_MODULE_LOAD_PATH, Path[Length + 1]));
+    if (!Record)
+        return;
+
+    Record->DllBase = DllBase;
+    RtlCopyMemory(Record->Path, Path, (Length + 1) * sizeof(WCHAR));
+    Record->Next = LdrpModuleLoadPaths;
+    LdrpModuleLoadPaths = Record;
+}
+
+static
+PWSTR
+LdrpGetModuleLoadPath(
+    _In_ PVOID DllBase)
+{
+    PLDRP_MODULE_LOAD_PATH Record;
+
+    for (Record = LdrpModuleLoadPaths; Record; Record = Record->Next)
+    {
+        if (Record->DllBase == DllBase)
+            return Record->Path;
+    }
+
+    return NULL;
+}
+
+static
+VOID
+LdrpForgetModuleLoadPath(
+    _In_ PVOID DllBase)
+{
+    PLDRP_MODULE_LOAD_PATH *Link = &LdrpModuleLoadPaths;
+    PLDRP_MODULE_LOAD_PATH Record;
+
+    while ((Record = *Link))
+    {
+        if (Record->DllBase == DllBase)
+        {
+            *Link = Record->Next;
+            RtlFreeHeap(LdrpHeap, 0, Record);
+            return;
+        }
+        Link = &Record->Next;
+    }
+}
+
 NTSTATUS
 NTAPI
 LdrpMapDll(IN PWSTR SearchPath OPTIONAL,
@@ -1489,6 +1555,11 @@ SkipCheck:
     LdrEntry->FullDllName = FullDllName;
     LdrEntry->BaseDllName = BaseDllName;
     LdrEntry->EntryPoint = LdrpFetchAddressOfEntryPoint(LdrEntry->DllBase);
+    if (SearchPath && SearchPath != LdrpDefaultPath.Buffer &&
+        wcscmp(SearchPath, LdrpDefaultPath.Buffer) != 0)
+    {
+        LdrpRecordModuleLoadPath(LdrEntry->DllBase, SearchPath);
+    }
 
 #if defined(_M_ARM64)
     /* AnyCPU assemblies can carry an i386 bootstrap thunk. It is not ARM64
@@ -1913,6 +1984,8 @@ LdrpFinalizeAndDeallocateDataTableEntry(IN PLDR_DATA_TABLE_ENTRY Entry)
 
     /* Release the full dll name string */
     if (Entry->FullDllName.Buffer) LdrpFreeUnicodeString(&Entry->FullDllName);
+
+    LdrpForgetModuleLoadPath(Entry->DllBase);
 
     /* Finally free the entry's memory */
     RtlFreeHeap(LdrpHeap, 0, Entry);
@@ -2667,6 +2740,8 @@ LdrpGetProcedureAddress(
             Status = STATUS_PROCEDURE_NOT_FOUND;
             _SEH2_YIELD(goto Quickie;)
         }
+
+        if (!DllPath) DllPath = LdrpGetModuleLoadPath(LdrEntry->DllBase);
 
         /* Now get the thunk */
         Status = LdrpSnapThunk(LdrEntry->DllBase,
