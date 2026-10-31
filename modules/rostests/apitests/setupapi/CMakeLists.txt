@@ -5,6 +5,7 @@ list(APPEND SOURCE
     InvalidDeviceInfoSet.c
     SetupCommitFileQueue.c
     SetupDiInstallClassExA.c
+    SetupDiInstallDeviceNullDriver.c
     SetupDiGetActualModelsSection.c
     SetupInstallFile.c
     SetupInstallServicesFromInfSectionEx.c
