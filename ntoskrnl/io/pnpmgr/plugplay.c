@@ -490,6 +490,12 @@ PiControlInitializeDevice(
     /* Insert as a root enumerated device node */
     PiInsertDevNode(DeviceNode, IopRootDeviceNode);
 
+    {
+        DEVICE_CAPABILITIES DeviceCapabilities;
+
+        IopQueryDeviceCapabilities(DeviceNode, &DeviceCapabilities);
+    }
+
     /* Report the device to the user-mode pnp manager */
     IopQueueDeviceInstallEvent(&GUID_DEVICE_ENUMERATED, &DeviceNode->InstancePath);
 
