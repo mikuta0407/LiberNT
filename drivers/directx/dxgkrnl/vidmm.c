@@ -14513,8 +14513,7 @@ DxgkpVidMmSubmitTransferPagingPacket(
  *
  * A memory-segment placement that receives no content (a fresh allocation)
  * is cleared, as Windows VidMm fills it with zeros, so it never shows what
- * an earlier owner of that memory left.  A CPU-visible segment is cleared
- * directly; otherwise the miniport is asked for DXGK_OPERATION_VIRTUAL_FILL
+ * an earlier owner of that memory left.  The miniport is asked for DXGK_OPERATION_VIRTUAL_FILL
  * through the paging process (GpuMmu) or DXGK_OPERATION_FILL.  Where no
  * fill can be issued (adapter teardown, KMD-exclusive callers) the
  * placement is left as it is and that is logged.
@@ -14537,12 +14536,6 @@ DxgkpVidMmZeroFillPlacement(
     Segment = &ADAPTER_SEGMENTS(Adapter)[Allocation->SegmentId - 1];
     if (VidMmSegmentIsAperture(Segment) || Segment->Flags.PitchAlignment)
         return STATUS_SUCCESS;
-    if (VidMmSegmentIsCpuVisible(Segment) && NT_SUCCESS(VidMmMapSegmentCpu(Segment)) &&
-        Allocation->SegmentOffset + Allocation->Size <= Segment->Size)
-    {
-        RtlZeroMemory((PUCHAR)Segment->CpuBase + Allocation->SegmentOffset, Allocation->Size);
-        return STATUS_SUCCESS;
-    }
     if (Adapter->KmdExclusiveOwnerThread == PsGetCurrentThread() ||
         InterlockedCompareExchange(&Adapter->SubmitDmaStopping, 0, 0) != 0)
     {
