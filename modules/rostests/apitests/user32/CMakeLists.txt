@@ -42,6 +42,7 @@ list(APPEND SOURCE
     desktop.c
     EmptyClipboard.c
     EnableScrollBar.c
+    EnumDisplayDevicesVirtioGpu.c
     EnumDisplaySettings.c
     ForegroundRetake.c
     ForegroundRight.c
