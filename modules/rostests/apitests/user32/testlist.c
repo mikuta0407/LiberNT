@@ -32,6 +32,7 @@ extern void func_EmptyClipboard(void);
 extern void func_ClipboardAccess(void);
 extern void func_ClipboardData(void);
 extern void func_EnableScrollBar(void);
+extern void func_EnumDisplayDevicesVirtioGpu(void);
 extern void func_EnumDisplaySettings(void);
 extern void func_ForegroundRetake(void);
 extern void func_ForegroundRight(void);
@@ -152,6 +153,7 @@ const struct test winetest_testlist[] =
     { "ClipboardAccess", func_ClipboardAccess },
     { "ClipboardData", func_ClipboardData },
     { "EnableScrollBar", func_EnableScrollBar },
+    { "EnumDisplayDevicesVirtioGpu", func_EnumDisplayDevicesVirtioGpu },
     { "EnumDisplaySettings", func_EnumDisplaySettings },
     { "ForegroundRetake", func_ForegroundRetake },
     { "ForegroundRight", func_ForegroundRight },
