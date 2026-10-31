@@ -1084,6 +1084,22 @@ InstallNullDriver(
 }
 
 static BOOL
+InstallRawDeviceNullDriver(
+    IN PDEVINSTDATA DevInstData)
+{
+    if (!SetupDiSetSelectedDriverW(DevInstData->hDevInfo,
+                                   &DevInstData->devInfoData,
+                                   NULL))
+    {
+        return FALSE;
+    }
+
+    return SetupDiCallClassInstaller(DIF_INSTALLDEVICE,
+                                     DevInstData->hDevInfo,
+                                     &DevInstData->devInfoData);
+}
+
+static BOOL
 IsDots(IN LPCWSTR str)
 {
     if(wcscmp(str, L".") && wcscmp(str, L"..")) return FALSE;
@@ -1694,7 +1710,17 @@ handle_search_result:
         }
         goto cleanup;
     }
-    else if (Show == SW_HIDE)
+
+    if (SearchResult == DriverSearchNotFound &&
+        !DevInstData->bUpdate &&
+        InstallRawDeviceNullDriver(DevInstData))
+    {
+        TRACE("Installed the null driver for raw device %s\n", debugstr_w(InstanceId));
+        retval = TRUE;
+        goto cleanup;
+    }
+
+    if (Show == SW_HIDE)
     {
         if (SearchResult == DriverSearchError)
         {

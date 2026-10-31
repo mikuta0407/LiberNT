@@ -6735,6 +6735,55 @@ RestartDevice(
 }
 
 static BOOL
+InstallRawNullDriver(
+        IN HDEVINFO DeviceInfoSet,
+        IN PSP_DEVINFO_DATA DeviceInfoData,
+        IN PSP_DEVINSTALL_PARAMS_W InstallParams)
+{
+    DWORD Capabilities, ConfigFlags, RegType;
+
+    if (!SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet,
+                                           DeviceInfoData,
+                                           SPDRP_CAPABILITIES,
+                                           &RegType,
+                                           (PBYTE)&Capabilities,
+                                           sizeof(Capabilities),
+                                           NULL) ||
+        RegType != REG_DWORD ||
+        !(Capabilities & CM_DEVCAP_RAWDEVICEOK))
+    {
+        SetLastError(ERROR_NO_DRIVER_SELECTED);
+        return FALSE;
+    }
+
+    if (SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet,
+                                          DeviceInfoData,
+                                          SPDRP_CONFIGFLAGS,
+                                          &RegType,
+                                          (PBYTE)&ConfigFlags,
+                                          sizeof(ConfigFlags),
+                                          NULL) &&
+        RegType == REG_DWORD &&
+        (ConfigFlags & (CONFIGFLAG_FAILEDINSTALL | CONFIGFLAG_REINSTALL)))
+    {
+        ConfigFlags &= ~(CONFIGFLAG_FAILEDINSTALL | CONFIGFLAG_REINSTALL);
+        if (!SetupDiSetDeviceRegistryPropertyW(DeviceInfoSet,
+                                               DeviceInfoData,
+                                               SPDRP_CONFIGFLAGS,
+                                               (PBYTE)&ConfigFlags,
+                                               sizeof(ConfigFlags)))
+        {
+            return FALSE;
+        }
+    }
+
+    if (InstallParams->Flags & (DI_NEEDRESTART | DI_NEEDREBOOT | DI_DONOTCALLCONFIGMG))
+        return TRUE;
+
+    return RestartDevice(DeviceInfoSet, DeviceInfoData, FALSE);
+}
+
+static BOOL
 HasAssociatedService(
         IN HDEVINFO DeviceInfoSet,
         IN PSP_DEVINFO_DATA DeviceInfoData)
@@ -7349,7 +7398,7 @@ SetupDiInstallDevice(
     SelectedDriver = (struct DriverInfoElement *)InstallParams.ClassInstallReserved;
     if (SelectedDriver == NULL)
     {
-        SetLastError(ERROR_NO_DRIVER_SELECTED);
+        ret = InstallRawNullDriver(DeviceInfoSet, DeviceInfoData, &InstallParams);
         goto cleanup;
     }
 
