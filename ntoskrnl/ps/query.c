@@ -5897,8 +5897,7 @@ NtQueryInformationThread(
 
             /* Reference the thread */
             Status = ObReferenceObjectByHandle(ThreadHandle,
-            // FIXME: Use THREAD_QUERY_LIMITED_INFORMATION when implemented
-                                               Access,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
                                                PsThreadType,
                                                PreviousMode,
                                                (PVOID*)&Thread,
@@ -5979,8 +5978,7 @@ NtQueryInformationThread(
 
             /* Reference the thread */
             Status = ObReferenceObjectByHandle(ThreadHandle,
-            // FIXME: Use THREAD_QUERY_LIMITED_INFORMATION when implemented
-                                               Access,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
                                                PsThreadType,
                                                PreviousMode,
                                                (PVOID*)&Thread,
@@ -6081,8 +6079,7 @@ NtQueryInformationThread(
 
             /* Reference the thread */
             Status = ObReferenceObjectByHandle(ThreadHandle,
-            // FIXME: Use THREAD_QUERY_LIMITED_INFORMATION when implemented
-                                               Access,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
                                                PsThreadType,
                                                PreviousMode,
                                                (PVOID*)&Thread,
