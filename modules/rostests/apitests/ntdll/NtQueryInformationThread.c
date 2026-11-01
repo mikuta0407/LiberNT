@@ -656,6 +656,79 @@ Test_ThreadCycleTimeShortRun(void)
     }
 }
 
+static
+HANDLE
+OpenCurrentThread(
+    _In_ ACCESS_MASK DesiredAccess)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    CLIENT_ID ClientId;
+    HANDLE Thread = NULL;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ClientId.UniqueProcess = NtCurrentTeb()->ClientId.UniqueProcess;
+    ClientId.UniqueThread = NtCurrentTeb()->ClientId.UniqueThread;
+    Status = NtOpenThread(&Thread, DesiredAccess, &ObjectAttributes, &ClientId);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    return NT_SUCCESS(Status) ? Thread : NULL;
+}
+
+static
+void
+Test_ThreadLimitedAccessClasses(void)
+{
+    static const struct
+    {
+        THREADINFOCLASS Class;
+        ULONG Length;
+        PCSTR Name;
+    } Classes[] =
+    {
+        { ThreadCycleTime, sizeof(THREAD_CYCLE_TIME_INFORMATION), "ThreadCycleTime" },
+        { ThreadActualGroupAffinity, sizeof(GROUP_AFFINITY), "ThreadActualGroupAffinity" },
+        { ThreadSuspendCount, sizeof(ULONG), "ThreadSuspendCount" },
+    };
+    ULONGLONG Buffer[4];
+    HANDLE Limited, Synchronize;
+    NTSTATUS Status;
+    ULONG i, Length;
+
+    Limited = OpenCurrentThread(THREAD_QUERY_LIMITED_INFORMATION);
+    Synchronize = OpenCurrentThread(SYNCHRONIZE);
+    if (!Limited || !Synchronize)
+    {
+        skip("Cannot open the current thread\n");
+        goto Quit;
+    }
+
+    for (i = 0; i < ARRAYSIZE(Classes); i++)
+    {
+        winetest_push_context("%s", Classes[i].Name);
+
+        RtlZeroMemory(Buffer, sizeof(Buffer));
+        Length = 0xDEADBEEF;
+        Status = NtQueryInformationThread(Limited, Classes[i].Class, Buffer, Classes[i].Length, &Length);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_long(Length, Classes[i].Length);
+
+        Status = NtQueryInformationThread(Synchronize, Classes[i].Class, Buffer, Classes[i].Length, &Length);
+        ok_ntstatus(Status, STATUS_ACCESS_DENIED);
+
+        winetest_pop_context();
+    }
+
+    Status = NtQueryInformationThread(Limited, ThreadCycleTime, Buffer, sizeof(THREAD_CYCLE_TIME_INFORMATION), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(((PTHREAD_CYCLE_TIME_INFORMATION)Buffer)->AccumulatedCycles != 0, "AccumulatedCycles is zero\n");
+
+Quit:
+    if (Synchronize)
+        NtClose(Synchronize);
+    if (Limited)
+        NtClose(Limited);
+}
+
 START_TEST(NtQueryInformationThread)
 {
     Test_ThreadBasicInformationClass();
@@ -663,4 +736,5 @@ START_TEST(NtQueryInformationThread)
     Test_ThreadQueryAlignmentProbe();
     Test_ThreadNameInformation();
     Test_ThreadCycleTimeShortRun();
+    Test_ThreadLimitedAccessClasses();
 }
