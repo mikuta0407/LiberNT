@@ -3685,6 +3685,7 @@ VidSchSubmitCommandTrackedMeasured(
     NTSTATUS Status;
     DPT_SCOPE Trace;
     BOOLEAN FenceReserved;
+    BOOLEAN PatchFence;
 
     PAGED_CODE();
 
@@ -3734,23 +3735,28 @@ VidSchSubmitCommandTrackedMeasured(
         return Status;
     }
 
-    Packet->SubmissionFenceId = DxgkAllocateSubmissionFenceId(Adapter);
-    if (Packet->SubmissionFenceId == 0)
+    PatchFence = DmaBuffer->VirtualBacking == NULL && DXGK_CB_FULL(Adapter, DxgkDdiPatch) != NULL;
+    if (PatchFence)
     {
-        VidSchpDereferencePacket(Packet);
-        VidSchpReleaseCall(Adapter);
-        return STATUS_INTEGER_OVERFLOW;
+        /* FIXME: DxgkDdiPatch needs the fence before admission can still fail, so a retried patched submission leaves a gap in the node's fence sequence */
+        Packet->SubmissionFenceId = DxgkAllocateSubmissionFenceId(Adapter);
+        if (Packet->SubmissionFenceId == 0)
+        {
+            VidSchpDereferencePacket(Packet);
+            VidSchpReleaseCall(Adapter);
+            return STATUS_INTEGER_OVERFLOW;
+        }
+        Trace = DptBegin(&g_DxgPresentTrace, DPT_KERNEL_FENCE_RESERVE);
+        FenceReserved = DxgkReserveSubmissionFenceIdentity(Adapter, NodeOrdinal, Packet->SubmissionFenceId, &Packet->FenceIdentityEpoch);
+        DptEnd(&g_DxgPresentTrace, Trace, FenceReserved, 0);
+        if (!FenceReserved)
+        {
+            VidSchpDereferencePacket(Packet);
+            VidSchpReleaseCall(Adapter);
+            return STATUS_DEVICE_BUSY;
+        }
+        Packet->FenceIdentityReserved = TRUE;
     }
-    Trace = DptBegin(&g_DxgPresentTrace, DPT_KERNEL_FENCE_RESERVE);
-    FenceReserved = DxgkReserveSubmissionFenceIdentity(Adapter, NodeOrdinal, Packet->SubmissionFenceId, &Packet->FenceIdentityEpoch);
-    DptEnd(&g_DxgPresentTrace, Trace, FenceReserved, 0);
-    if (!FenceReserved)
-    {
-        VidSchpDereferencePacket(Packet);
-        VidSchpReleaseCall(Adapter);
-        return STATUS_DEVICE_BUSY;
-    }
-    Packet->FenceIdentityReserved = TRUE;
     Packet->MiniportDeviceHandle = MiniportDeviceHandle;
     Packet->MiniportContextHandle = MiniportContextHandle;
     Packet->Priority = Priority;
@@ -3843,7 +3849,7 @@ VidSchSubmitCommandTrackedMeasured(
         Packet->HoldsContextReference = TRUE;
     }
 
-    if (!Packet->VirtualAddressing && DXGK_CB_FULL(Adapter, DxgkDdiPatch) != NULL)
+    if (PatchFence)
     {
         RtlZeroMemory(&PatchArgs, sizeof(PatchArgs));
         if (Adapter->SchedulingCaps.MultiEngineAware)
@@ -3924,7 +3930,6 @@ VidSchSubmitCommandTrackedMeasured(
         VidSchpReleaseCall(Adapter);
         return STATUS_DEVICE_BUSY;
     }
-    FenceId = Packet->SubmissionFenceId;
     Sched = VidSchpScheduler(Adapter);
     if (Sched == NULL)
     {
@@ -3955,7 +3960,6 @@ VidSchSubmitCommandTrackedMeasured(
         VidSchpReleaseCall(Adapter);
         return Status;
     }
-    DxgkStampTrackedDmaBufferReferences(Adapter, Reservation);
     if (Packet->Context != NULL)
     {
         OrderedContext = (PDXGKRNL_CONTEXT)Packet->Context;
@@ -3982,6 +3986,30 @@ VidSchSubmitCommandTrackedMeasured(
             return Status;
         }
     }
+    if (!PatchFence)
+    {
+        Packet->SubmissionFenceId = DxgkAllocateSubmissionFenceId(Adapter);
+        Trace = DptBegin(&g_DxgPresentTrace, DPT_KERNEL_FENCE_RESERVE);
+        FenceReserved = Packet->SubmissionFenceId != 0 && DxgkReserveSubmissionFenceIdentity(Adapter, NodeOrdinal, Packet->SubmissionFenceId, &Packet->FenceIdentityEpoch);
+        DptEnd(&g_DxgPresentTrace, Trace, FenceReserved, 0);
+        if (!FenceReserved)
+        {
+            Sched->ReleaseSlot(Sched->SchedulerHandle, Engine->SchedulerOrdinal);
+            ExReleaseFastMutex(&Ctx->LifecycleMutex);
+            if (Packet->ContextOrderOperation != NULL)
+                DxgkContextOrderAbortPacket(Packet, STATUS_DEVICE_BUSY);
+            if (OrderedContext != NULL)
+                ExReleaseRundownProtection(&OrderedContext->StreamAdmissionRundown);
+            DxgkCancelTrackedDmaBuffer(Reservation);
+            VidSchpDereferencePacket(Packet);
+            VidSchpReleaseCall(Adapter);
+            return STATUS_DEVICE_BUSY;
+        }
+        Packet->FenceIdentityReserved = TRUE;
+        Reservation->SubmissionFenceId = Packet->SubmissionFenceId;
+    }
+    FenceId = Packet->SubmissionFenceId;
+    DxgkStampTrackedDmaBufferReferences(Adapter, Reservation);
     KeAcquireSpinLock(&Engine->QueueLock, &OldIrql);
     Packet->DmaBuffer = DmaBuffer;
     Packet->TrackerReservation = Reservation;
