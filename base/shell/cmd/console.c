@@ -58,7 +58,7 @@ VOID ConInFlush(VOID)
     FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
 }
 
-VOID ConInKey(PINPUT_RECORD lpBuffer)
+BOOL ConInKey(PINPUT_RECORD lpBuffer)
 {
     HANDLE hInput = GetStdHandle(STD_INPUT_HANDLE);
     DWORD  dwRead;
@@ -68,7 +68,8 @@ VOID ConInKey(PINPUT_RECORD lpBuffer)
 
     do
     {
-        ReadConsoleInput(hInput, lpBuffer, 1, &dwRead);
+        if (!ReadConsoleInput(hInput, lpBuffer, 1, &dwRead))
+            return FALSE;
         if (lpBuffer->EventType == KEY_EVENT &&
             lpBuffer->Event.KeyEvent.bKeyDown)
         {
@@ -76,6 +77,7 @@ VOID ConInKey(PINPUT_RECORD lpBuffer)
         }
     }
     while (TRUE);
+    return TRUE;
 }
 
 VOID ConInString(LPWSTR lpInput, DWORD dwLength)

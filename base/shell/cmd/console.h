@@ -18,7 +18,7 @@ extern CON_PAGER  StdOutPager;
 VOID ConInDisable (VOID);
 VOID ConInEnable (VOID);
 VOID ConInFlush (VOID);
-VOID ConInKey (PINPUT_RECORD);
+BOOL ConInKey (PINPUT_RECORD);
 VOID ConInString (LPTSTR, DWORD);
 
 

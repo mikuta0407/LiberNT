@@ -193,7 +193,8 @@ BOOL ReadCommand(LPTSTR str, INT maxlen, BOOL bMore)
     do
     {
         bReturn = FALSE;
-        ConInKey (&ir);
+        if (!ConInKey (&ir))
+            return FALSE;
 
         dwControlKeyState = ir.Event.KeyEvent.dwControlKeyState;
 
