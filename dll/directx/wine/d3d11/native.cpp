@@ -214,6 +214,7 @@ public:
     bool clearing = false;
     IDXGIAdapter *adapter = NULL;
     D3DKMT_HANDLE km_adapter = 0;
+    LUID adapter_luid = {};
     D3DKMT_HANDLE km_device = 0;
     HANDLE runtime_device = NULL;
     HMODULE umd = NULL;
@@ -2080,6 +2081,7 @@ HRESULT NativeDevice::Initialize(IDXGIAdapter *selected_adapter, UINT creation_f
     open.AdapterLuid = desc.AdapterLuid;
     if (FAILED(hr = StatusToHresult(D3DKMTOpenAdapterFromLuid(&open)))) return hr;
     km_adapter = open.hAdapter;
+    adapter_luid = desc.AdapterLuid;
     D3DKMT_UMDFILENAMEINFO name = {};
     name.Version = KMTUMDVERSION_DX11;
     D3DKMT_QUERYADAPTERINFO query = {};
@@ -6680,13 +6682,10 @@ HRESULT NativeSwapChain::PublishForeign(NativeTexture2D *texture)
         update_surface = reinterpret_cast<UpdateSurface>(GetProcAddress(dwmapi, reinterpret_cast<LPCSTR>(static_cast<ULONG_PTR>(101))));
         if (!get_surface || !update_surface) return DXGI_ERROR_UNSUPPORTED;
     }
-    DXGI_ADAPTER_DESC adapter_desc;
-    HRESULT hr = device->adapter->GetDesc(&adapter_desc);
-    if (FAILED(hr)) return hr;
     UINT format = 0;
     HANDLE shared = NULL;
     ULONGLONG update = 0;
-    hr = get_surface(window, adapter_desc.AdapterLuid, NULL, 0, &format, &shared, &update);
+    HRESULT hr = get_surface(window, device->adapter_luid, NULL, 0, &format, &shared, &update);
     if (hr == S_FALSE) return S_OK;
     if (FAILED(hr)) return hr;
     D3DKMT_HANDLE share = static_cast<D3DKMT_HANDLE>(reinterpret_cast<ULONG_PTR>(shared));
@@ -6745,10 +6744,7 @@ HRESULT NativeSwapChain::Publish(NativeTexture2D *texture)
     exchange.StructSize = sizeof(exchange);
     exchange.Action = DWM_DX_SURFACE_PUBLISH;
     exchange.Window = reinterpret_cast<ULONG_PTR>(window);
-    DXGI_ADAPTER_DESC adapter_desc;
-    HRESULT hr = device->adapter->GetDesc(&adapter_desc);
-    if (FAILED(hr)) return hr;
-    exchange.AdapterLuid = adapter_desc.AdapterLuid;
+    exchange.AdapterLuid = device->adapter_luid;
     D3DKMT_HANDLE shared = 0;
     HANDLE release = ReleaseEvent(texture, &shared);
     if (!release) return E_OUTOFMEMORY;
@@ -6773,7 +6769,7 @@ HRESULT NativeSwapChain::Publish(NativeTexture2D *texture)
     exchange.UpdateRect.bottom = desc.Height;
     ResetEvent(release);
     ULONGLONG trace_start = NativeTraceNow();
-    hr = QueuePublish(exchange, release);
+    HRESULT hr = QueuePublish(exchange, release);
     trace_submit += NativeTraceNow() - trace_start;
     if (FAILED(hr)) SetEvent(release);
     return hr;
