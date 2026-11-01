@@ -55,6 +55,8 @@ extern void func_ctxflags(void);
 extern void func_eventcancel(void);
 extern void func_scheduling(void);
 extern void func_native11(void);
+extern void func_vblankstate(void);
+extern void func_flipcadence(void);
 extern void func_resource_min_lod(void);
 extern void func_umdcallbacks(void);
 extern void func_abifreeze(void);
@@ -148,6 +150,8 @@ const struct test winetest_testlist[] =
     { "eventcancel",   func_eventcancel },
     { "scheduling",    func_scheduling },
     { "native11",      func_native11 },
+    { "vblankstate",   func_vblankstate },
+    { "flipcadence",   func_flipcadence },
     { "resource_min_lod", func_resource_min_lod },
     { "umdcallbacks",  func_umdcallbacks },
     { "abifreeze",     func_abifreeze },
