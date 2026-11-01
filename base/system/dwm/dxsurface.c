@@ -107,6 +107,8 @@ static BOOL g_GetSharedResourceAdapterLuidResolved;
 static PFN_DWM_D3DKMT_OPENADAPTERFROMLUID g_OpenAdapterFromLuid;
 static BOOL g_OpenAdapterFromLuidResolved;
 static D3DKMT_HANDLE g_VBlankAdapter;
+static D3DKMT_HANDLE g_VBlankDevice;
+static BOOL g_VBlankDeviceFailed;
 static D3DDDI_VIDEO_PRESENT_SOURCE_ID g_VBlankSource;
 static DWORD g_VBlankRetryTick;
 static BOOL g_VBlankFailed;
@@ -816,10 +818,47 @@ DwmDxCloseVBlankAdapter(void)
 
     if (g_VBlankAdapter == 0)
         return;
+    if (g_VBlankDevice != 0)
+    {
+        D3DKMT_DESTROYDEVICE DestroyDevice;
+
+        RtlZeroMemory(&DestroyDevice, sizeof(DestroyDevice));
+        DestroyDevice.hDevice = g_VBlankDevice;
+        (void)D3DKMTDestroyDevice(&DestroyDevice);
+        g_VBlankDevice = 0;
+    }
+    g_VBlankDeviceFailed = FALSE;
     RtlZeroMemory(&CloseAdapter, sizeof(CloseAdapter));
     CloseAdapter.hAdapter = g_VBlankAdapter;
     (void)D3DKMTCloseAdapter(&CloseAdapter);
     g_VBlankAdapter = 0;
+}
+
+static BOOL
+DwmDxOpenVBlankAdapter(void)
+{
+    D3DKMT_OPENADAPTERFROMHDC Open;
+    NTSTATUS Status;
+    HDC Dc;
+
+    if (g_VBlankAdapter != 0)
+        return TRUE;
+    if (g_VBlankFailed && GetTickCount() - g_VBlankRetryTick < 1000)
+        return FALSE;
+    g_VBlankFailed = TRUE;
+    g_VBlankRetryTick = GetTickCount();
+    Dc = GetDC(NULL);
+    if (Dc == NULL)
+        return FALSE;
+    RtlZeroMemory(&Open, sizeof(Open));
+    Open.hDc = Dc;
+    Status = D3DKMTOpenAdapterFromHdc(&Open);
+    ReleaseDC(NULL, Dc);
+    if (!NT_SUCCESS(Status) || Open.hAdapter == 0)
+        return FALSE;
+    g_VBlankAdapter = Open.hAdapter;
+    g_VBlankSource = Open.VidPnSourceId;
+    return TRUE;
 }
 
 BOOL
@@ -828,27 +867,8 @@ DwmDxWaitForVBlank(void)
     D3DKMT_WAITFORVERTICALBLANKEVENT Wait;
     NTSTATUS Status;
 
-    if (g_VBlankAdapter == 0)
-    {
-        D3DKMT_OPENADAPTERFROMHDC Open;
-        HDC Dc;
-
-        if (g_VBlankFailed && GetTickCount() - g_VBlankRetryTick < 1000)
-            return FALSE;
-        g_VBlankFailed = TRUE;
-        g_VBlankRetryTick = GetTickCount();
-        Dc = GetDC(NULL);
-        if (Dc == NULL)
-            return FALSE;
-        RtlZeroMemory(&Open, sizeof(Open));
-        Open.hDc = Dc;
-        Status = D3DKMTOpenAdapterFromHdc(&Open);
-        ReleaseDC(NULL, Dc);
-        if (!NT_SUCCESS(Status) || Open.hAdapter == 0)
-            return FALSE;
-        g_VBlankAdapter = Open.hAdapter;
-        g_VBlankSource = Open.VidPnSourceId;
-    }
+    if (!DwmDxOpenVBlankAdapter())
+        return FALSE;
 
     RtlZeroMemory(&Wait, sizeof(Wait));
     Wait.hAdapter = g_VBlankAdapter;
@@ -860,6 +880,44 @@ DwmDxWaitForVBlank(void)
         return TRUE;
     }
     DwmDxCloseVBlankAdapter();
+    return FALSE;
+}
+
+BOOL
+DwmDxGetVBlankCount(PULONG Count)
+{
+    D3DKMT_GETDEVICESTATE State;
+    D3DKMT_DESTROYDEVICE DestroyDevice;
+
+    if (g_VBlankDeviceFailed || !DwmDxOpenVBlankAdapter())
+        return FALSE;
+    if (g_VBlankDevice == 0)
+    {
+        D3DKMT_CREATEDEVICE CreateDevice;
+
+        RtlZeroMemory(&CreateDevice, sizeof(CreateDevice));
+        CreateDevice.hAdapter = g_VBlankAdapter;
+        if (!NT_SUCCESS(D3DKMTCreateDevice(&CreateDevice)))
+        {
+            g_VBlankDeviceFailed = TRUE;
+            return FALSE;
+        }
+        g_VBlankDevice = CreateDevice.hDevice;
+    }
+    RtlZeroMemory(&State, sizeof(State));
+    State.hDevice = g_VBlankDevice;
+    State.StateType = D3DKMT_DEVICESTATE_PRESENT_DWM;
+    State.PresentStateDWM.VidPnSourceId = g_VBlankSource;
+    if (NT_SUCCESS(D3DKMTGetDeviceState(&State)))
+    {
+        *Count = State.PresentStateDWM.PresentStatsDWM.SyncRefreshCount;
+        return TRUE;
+    }
+    RtlZeroMemory(&DestroyDevice, sizeof(DestroyDevice));
+    DestroyDevice.hDevice = g_VBlankDevice;
+    (void)D3DKMTDestroyDevice(&DestroyDevice);
+    g_VBlankDevice = 0;
+    g_VBlankDeviceFailed = TRUE;
     return FALSE;
 }
 
