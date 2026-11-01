@@ -3829,6 +3829,8 @@ static void   *g_compBits;
 static ULONGLONG g_qpcPerSecond;
 static ULONGLONG g_refreshPeriodQpc;
 static ULONGLONG g_lastFrameQpc;
+static ULONG g_lastFrameVBlank;
+static BOOL g_lastFrameVBlankValid;
 
 /*
  * Frame accounting.  The compositor's cost is dominated by whole-surface work
@@ -4170,6 +4172,8 @@ DwmComposeLoop(HANDLE hStopEvent)
     LARGE_INTEGER stgA = {{0}};
     LARGE_INTEGER stgB = {{0}};
     LARGE_INTEGER statFrameStart = {{0}};
+    ULONG frameVBlank = 0;
+    BOOL frameVBlankValid = FALSE;
     LARGE_INTEGER statFetchStart = {{0}};
     LARGE_INTEGER statFetchEnd = {{0}};
     DWM_THREAD_TIME statDrawCpuStart, statDrawCpuEnd;
@@ -4379,8 +4383,12 @@ DwmComposeLoop(HANDLE hStopEvent)
             {
                 DWORD WaitMs = (DWORD)(((g_refreshPeriodQpc - Elapsed) *
                                         1000ull) / g_qpcPerSecond);
+                ULONG VBlank;
 
-                if (WaitMs != 0)
+                /* A vertical blank since the last frame started has already paced it. */
+                if (WaitMs != 0 &&
+                    !(g_lastFrameVBlankValid && DwmDxGetVBlankCount(&VBlank) &&
+                      VBlank != g_lastFrameVBlank))
                 {
                     if (DwmDxWaitForVBlank())
                     {
@@ -4598,6 +4606,7 @@ DwmComposeLoop(HANDLE hStopEvent)
                 }
 
                 QueryPerformanceCounter(&statFrameStart);
+                frameVBlankValid = DwmDxGetVBlankCount(&frameVBlank);
                 g_framePrepareTicks = g_frameStats ?
                     (ULONGLONG)(statFrameStart.QuadPart - statFetchEnd.QuadPart) : 0;
 
@@ -4720,6 +4729,8 @@ DwmComposeLoop(HANDLE hStopEvent)
                             GetPixel(hdcScreen, 0, 0);
                         }
                         g_lastFrameQpc = (ULONGLONG)statFrameStart.QuadPart;
+                        g_lastFrameVBlank = frameVBlank;
+                        g_lastFrameVBlankValid = frameVBlankValid;
                         /* On the GPU path these fields mean clear/context,
                          * window draw/upload, and swap/direct-flip.  Keeping
                          * the existing labels makes the serial format stable
@@ -4983,6 +4994,8 @@ DwmComposeLoop(HANDLE hStopEvent)
                     else
                     {
                         g_lastFrameQpc = (ULONGLONG)statFrameStart.QuadPart;
+                        g_lastFrameVBlank = frameVBlank;
+                        g_lastFrameVBlankValid = frameVBlankValid;
                         DptCount(&g_DwmPresentTrace, DPT_FRAME, (ULONGLONG)(pr - pl) * (pb - pt) * 4);
                         for (i = 0; i < hdr->Count; ++i)
                         {

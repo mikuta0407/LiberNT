@@ -29,6 +29,7 @@ void DwmDxSweepSurfaces(const DWM_WIN *Windows, ULONG Count);
 void DwmDxCleanupSurfaces(void);
 void DwmDxReleaseRedirectionMappings(void);
 BOOL DwmDxWaitForVBlank(void);
+BOOL DwmDxGetVBlankCount(PULONG Count);
 
 #ifdef __cplusplus
 }
