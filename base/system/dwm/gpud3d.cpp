@@ -183,6 +183,8 @@ struct Compositor
     ID3D11BlendState *Blend, *PremultipliedBlend, *InvertBlend;
     ID3D11RasterizerState *Rasterizer;
     ID3D11Query *Completion, *ClientCopies;
+    IDXGIDevice2 *DxgiDevice;
+    HANDLE Retired;
     /* ClientCopies fences the copies Begin makes of new client publications.
      * A copy made after that fence cannot be released early. */
     BOOL CopyingClients, ClientCopiesFenced, ClientCopiesUnfenced;
@@ -431,6 +433,8 @@ BOOL FinishGpuReadsImpl(DWM_GPU_WAIT_TIMING *Timing)
     State.Context->Flush();
     if (Timing)
         Timing->Ticks[DWM_WAIT_FLUSH] += DptNow() - Tick;
+    BOOL Retiring = State.Retired != NULL && ResetEvent(State.Retired) &&
+                    SUCCEEDED(State.DxgiDevice->EnqueueSetEvent(State.Retired));
     DWORD Start = GetTickCount();
     BOOL Reported = FALSE;
     LARGE_INTEGER Frequency, YieldStart, YieldNow;
@@ -440,8 +444,12 @@ BOOL FinishGpuReadsImpl(DWM_GPU_WAIT_TIMING *Timing)
     {
         BOOL Complete = FALSE;
         if (Timing) Tick = DptNow();
-        HRESULT Status = State.Context->GetData(State.Completion, &Complete, sizeof(Complete),
-                                                D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        HRESULT Status = S_OK;
+        if (Retiring)
+            Complete = WaitForSingleObject(State.Retired, 0) == WAIT_OBJECT_0;
+        else
+            Status = State.Context->GetData(State.Completion, &Complete, sizeof(Complete),
+                                            D3D11_ASYNC_GETDATA_DONOTFLUSH);
         if (Timing)
         {
             Timing->Ticks[DWM_WAIT_QUERY] += DptNow() - Tick;
@@ -481,12 +489,17 @@ BOOL FinishGpuReadsImpl(DWM_GPU_WAIT_TIMING *Timing)
          * reuse published surfaces. A removed device has stopped executing
          * this command stream, so its resources are released and recreated. */
         if (Timing) Tick = DptNow();
-        /* A timer-granular Sleep would cost most of a frame, so yield first. */
-        QueryPerformanceCounter(&YieldNow);
-        if ((YieldNow.QuadPart - YieldStart.QuadPart) * 250 < Frequency.QuadPart)
-            SwitchToThread();
+        if (Retiring)
+            WaitForSingleObject(State.Retired, 100);
         else
-            Sleep(1);
+        {
+            /* A timer-granular Sleep would cost most of a frame, so yield first. */
+            QueryPerformanceCounter(&YieldNow);
+            if ((YieldNow.QuadPart - YieldStart.QuadPart) * 250 < Frequency.QuadPart)
+                SwitchToThread();
+            else
+                Sleep(1);
+        }
         if (Timing)
         {
             ULONGLONG Elapsed = DptNow() - Tick;
@@ -684,6 +697,8 @@ BOOL CreateShaders()
     Rasterizer.ScissorEnable = TRUE;
     if (!Result(State.Device->CreateRasterizerState(&Rasterizer, &State.Rasterizer), "CreateRasterizerState"))
         return FALSE;
+    if (SUCCEEDED(State.Device->QueryInterface(IID_IDXGIDevice2, (void **)&State.DxgiDevice)))
+        State.Retired = CreateEventW(NULL, TRUE, FALSE, NULL);
     D3D11_QUERY_DESC Query = {D3D11_QUERY_EVENT, 0};
     return Result(State.Device->CreateQuery(&Query, &State.Completion), "CreateQuery") &&
            Result(State.Device->CreateQuery(&Query, &State.ClientCopies), "CreateQuery client copies");
@@ -1734,6 +1749,12 @@ DwmD3dShutdown(void)
     Release(State.BackBuffer);
     Release(State.ClientCopies);
     Release(State.Completion);
+    if (State.Retired != NULL)
+    {
+        CloseHandle(State.Retired);
+        State.Retired = NULL;
+    }
+    Release(State.DxgiDevice);
     Release(State.Rasterizer);
     Release(State.PremultipliedBlend);
     Release(State.InvertBlend);
