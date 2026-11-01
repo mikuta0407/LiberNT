@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     cmd.c
     fc.c
+    hostexit.c
     testlist.c)
 
 add_executable(cmd_apitest ${SOURCE})
