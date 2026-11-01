@@ -738,6 +738,42 @@ Cleanup:
     return Status;
 }
 
+NTSTATUS
+DxgkPresentQueryVBlank(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId,
+    _Out_ PULONG VBlankCount,
+    _Out_ PLARGE_INTEGER VBlankQpcTime)
+{
+    PDXGKRNL_PRESENT_QUEUE Queue;
+    KIRQL OldIrql;
+    NTSTATUS Status;
+
+    *VBlankCount = 0;
+    VBlankQpcTime->QuadPart = 0;
+    if (!DxgkpAcquirePresentQueues(Adapter))
+        return STATUS_DEVICE_REMOVED;
+    if (Adapter->PresentQueues == NULL ||
+        VidPnSourceId >= Adapter->PresentQueueCount)
+    {
+        Status = Adapter->PresentQueues == NULL
+                     ? Adapter->PresentQueueInitializationStatus
+                     : STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+
+    Queue = &((PDXGKRNL_PRESENT_QUEUE)Adapter->PresentQueues)[VidPnSourceId];
+    KeAcquireSpinLock(&Queue->VBlankWaitLock, &OldIrql);
+    *VBlankCount = (ULONG)Queue->VBlankCount;
+    VBlankQpcTime->QuadPart = Queue->VBlankQpcTime;
+    KeReleaseSpinLock(&Queue->VBlankWaitLock, OldIrql);
+    Status = STATUS_SUCCESS;
+
+Cleanup:
+    DxgkpReleasePresentQueues(Adapter);
+    return Status;
+}
+
 #if (REACTOS_WDDM_TARGET_LEVEL >= 1200)
 NTSTATUS
 DxgkPresentOpenDwmVBlankEvent(
@@ -6292,7 +6328,10 @@ DxgkpNotifyVSync(
     }
 
     Queue = &((PDXGKRNL_PRESENT_QUEUE)Adapter->PresentQueues)[VidPnSourceId];
+    KeAcquireSpinLock(&Queue->VBlankWaitLock, &OldIrql);
     InterlockedIncrement64(&Queue->VBlankCount);
+    Queue->VBlankQpcTime = KeQueryPerformanceCounter(NULL).QuadPart;
+    KeReleaseSpinLock(&Queue->VBlankWaitLock, OldIrql);
     KeSetEvent(&Queue->MmioVSyncEvent, IO_NO_INCREMENT, FALSE);
     DxgkpSignalQueueVBlankWaiters(Queue, FALSE);
 

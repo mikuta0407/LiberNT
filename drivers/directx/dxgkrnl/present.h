@@ -315,6 +315,7 @@ typedef struct _DXGKRNL_PRESENT_QUEUE
      *   LastPresentVBlank — VBlankCount at which the last present executed.
      */
     volatile LONG64                 VBlankCount;
+    LONG64                          VBlankQpcTime;
     LONG64                          LastPresentVBlank;
     /* One MMIO flip is armed at a time. Both slots own an allocation
      * reference and one residency pin; a matching CRTC address releases
@@ -450,6 +451,13 @@ DxgkpWaitForVerticalBlank(
     _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId,
     _In_ UINT NumObjects,
     _In_reads_opt_(NumObjects) CONST D3DKMT_PTR_TYPE *ObjectHandleArray);
+
+NTSTATUS
+DxgkPresentQueryVBlank(
+    _In_ struct _DXGKRNL_ADAPTER *Adapter,
+    _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId,
+    _Out_ PULONG VBlankCount,
+    _Out_ PLARGE_INTEGER VBlankQpcTime);
 
 #if (REACTOS_WDDM_TARGET_LEVEL >= 1200)
 NTSTATUS

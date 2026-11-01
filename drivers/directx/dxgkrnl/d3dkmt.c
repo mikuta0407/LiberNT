@@ -6064,9 +6064,28 @@ DxgkGetDeviceState(
             break;
 
         case D3DKMT_DEVICESTATE_PRESENT:
-        case D3DKMT_DEVICESTATE_PRESENT_DWM:
             Status = STATUS_NOT_SUPPORTED;
             break;
+
+        case D3DKMT_DEVICESTATE_PRESENT_DWM:
+        {
+            D3DKMT_PRESENT_STATS_DWM *Stats = &pData->PresentStateDWM.PresentStatsDWM;
+            ULONG VBlankCount;
+            LARGE_INTEGER VBlankQpcTime;
+
+            RtlZeroMemory(Stats, sizeof(*Stats));
+            /* TODO: PresentCount, PresentRefreshCount and PresentQPCTime of the device's presents on the source */
+            Status = DxgkPresentQueryVBlank(Adapter,
+                                            pData->PresentStateDWM.VidPnSourceId,
+                                            &VBlankCount,
+                                            &VBlankQpcTime);
+            if (NT_SUCCESS(Status))
+            {
+                Stats->SyncRefreshCount = VBlankCount;
+                Stats->SyncQPCTime = VBlankQpcTime;
+            }
+            break;
+        }
 
 #if (REACTOS_WDDM_TARGET_LEVEL >= 2000)
         case D3DKMT_DEVICESTATE_PAGE_FAULT:
