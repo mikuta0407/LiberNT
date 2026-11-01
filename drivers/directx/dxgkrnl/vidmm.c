@@ -15264,7 +15264,7 @@ DxgkpVidMmCleanAllocationForSubmissionLockedImpl(
     }
 
     Segment = &ADAPTER_SEGMENTS(Adapter)[Allocation->SegmentId - 1];
-    if (!VidMmSegmentIsAperture(Segment))
+    if (!DxgkResidencyCoreSubmissionNeedsCacheClean(VidMmSegmentIsAperture(Segment), (BOOLEAN)Segment->Flags.CacheCoherent))
         return STATUS_SUCCESS;
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
         return STATUS_INVALID_DEVICE_STATE;

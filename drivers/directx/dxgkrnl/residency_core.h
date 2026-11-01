@@ -152,6 +152,7 @@ VOID DxgkResidencyCorePinSubmission(_Inout_ PDXGK_RESIDENCY_REFS Refs);
 VOID DxgkResidencyCoreUnpinSubmission(_Inout_ PDXGK_RESIDENCY_REFS Refs);
 /* Evictable only when nothing references it and no submission holds it. */
 BOOLEAN DxgkResidencyCoreIsEvictable(_In_ const DXGK_RESIDENCY_REFS *Refs);
+BOOLEAN DxgkResidencyCoreSubmissionNeedsCacheClean(_In_ BOOLEAN Aperture, _In_ BOOLEAN CacheCoherent);
 
 /* --- callback-spanning residency transactions ------------------------- */
 

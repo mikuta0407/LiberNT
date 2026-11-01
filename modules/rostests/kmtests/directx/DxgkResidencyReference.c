@@ -264,6 +264,16 @@ static VOID TestRollbackAndEvictOwnership(VOID)
     ok_bool_false(Evict, "under-owned duplicate request cannot evict");
 }
 
+static VOID TestSubmissionCacheClean(VOID)
+{
+    ok_bool_true(DxgkResidencyCoreSubmissionNeedsCacheClean(TRUE, FALSE),
+                 "a non-coherent aperture needs CPU cache maintenance");
+    ok_bool_false(DxgkResidencyCoreSubmissionNeedsCacheClean(TRUE, TRUE),
+                  "a cache-coherent aperture needs no CPU cache maintenance");
+    ok_bool_false(DxgkResidencyCoreSubmissionNeedsCacheClean(FALSE, FALSE),
+                  "a memory segment is never cleaned for submission");
+}
+
 START_TEST(DxgkResidencyReference)
 {
     TestExplicitReferences();
@@ -272,6 +282,7 @@ START_TEST(DxgkResidencyReference)
     TestSubmissionPin();
     TestTransactionOwnerRace();
     TestRollbackAndEvictOwnership();
+    TestSubmissionCacheClean();
 }
 
 /* EOF */

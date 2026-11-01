@@ -460,6 +460,14 @@ DxgkResidencyCoreIsEvictable(
     return Refs->TotalCount == 0 && Refs->SubmissionPinCount == 0;
 }
 
+BOOLEAN
+DxgkResidencyCoreSubmissionNeedsCacheClean(
+    _In_ BOOLEAN Aperture,
+    _In_ BOOLEAN CacheCoherent)
+{
+    return Aperture && !CacheCoherent;
+}
+
 /* --- callback-spanning residency transactions ------------------------- */
 
 BOOLEAN
