@@ -392,7 +392,12 @@ OslLoadBootDrivers(
 
     OslDisableLegacyBootServices();
 
-    if (!CmpFindDrivers(OslSystemHive, OslControlSet, BootLoad, FsGetDriverName(Device), Head) ||
+    if (!CmpFindDrivers(OslSystemHive,
+                        OslControlSet,
+                        BootLoad,
+                        FsGetDriverName(Device),
+                        Device->Virtual ? CM_SERVICE_VIRTUAL_DISK_BOOT_LOAD : 0,
+                        Head) ||
         !CmpSortDriverList(OslSystemHive, OslControlSet, Head) ||
         !CmpResolveDriverDependencies(Head))
     {

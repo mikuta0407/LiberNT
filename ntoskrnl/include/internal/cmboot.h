@@ -56,6 +56,7 @@ CmpFindDrivers(
     _In_ HCELL_INDEX ControlSet,
     _In_ SERVICE_LOAD_TYPE LoadType,
     _In_opt_ PCWSTR BootFileSystem,
+    _In_ ULONG ExtraBootDriverFlags,
     _Inout_ PLIST_ENTRY DriverListHead);
 
 CODE_SEG("INIT")
