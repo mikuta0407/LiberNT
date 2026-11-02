@@ -78,6 +78,7 @@ if(((REACTOS_USE_WDDM AND (REACTOS_WDDM_TARGET_LEVEL GREATER_EQUAL 2000)) OR MES
     add_subdirectory(pvrkmt)
 endif()
 add_subdirectory(vcruntime)
+add_subdirectory(vhdx)
 add_subdirectory(vcstartup)
 add_subdirectory(wine2ros)
 if(REACTOS_USE_WDDM)
