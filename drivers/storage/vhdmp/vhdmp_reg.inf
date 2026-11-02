@@ -1,0 +1,8 @@
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\vhdmp","BootFlags",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\vhdmp","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\vhdmp","Group",0x00000000,"SCSI miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\vhdmp","ImagePath",0x00020000,"system32\drivers\vhdmp.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\vhdmp","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\vhdmp","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\vhdmp\Parameters","BusType",0x00010001,0x0000000F
