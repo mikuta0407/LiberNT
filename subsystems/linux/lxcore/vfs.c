@@ -660,6 +660,7 @@ LxInstanceMountNt(
     _In_ ULONG Flags,
     _In_ PCUNICODE_STRING NtRoot,
     _In_ ULONG64 Magic,
+    _In_opt_ const LX_DRVFS_OPTIONS *Drvfs,
     _Out_opt_ PLX_MOUNT *Out)
 {
     PLX_MOUNT Mount = LxAlloc(sizeof(*Mount));
@@ -668,6 +669,11 @@ LxInstanceMountNt(
         return -LX_ENOMEM;
 
     Mount->Kind = LxFsNt;
+    if (Drvfs != NULL)
+    {
+        Mount->Drvfs = TRUE;
+        Mount->DrvfsOptions = *Drvfs;
+    }
     Mount->Target = LxStrDup(Target);
     Mount->Source = LxStrDup(Source);
     Mount->FsType = LxStrDup(FsType);
@@ -937,7 +943,7 @@ LxInstanceCreate(
     }
 
     Ns = Instance->RootNs[LxNsMnt];
-    LxInstanceMountNt(Ns, "/", "/dev/root", "lxfs", 0, &Instance->RootNt, LX_MAGIC_NTFS, NULL);
+    LxInstanceMountNt(Ns, "/", "/dev/root", "lxfs", 0, &Instance->RootNt, LX_MAGIC_NTFS, NULL, NULL);
     LxInstanceMountSynthetic(Ns, "/proc", "proc", "proc", LX_MS_NOSUID | LX_MS_NODEV | LX_MS_NOEXEC,
                              LxFsProc, LX_MAGIC_PROC, NULL);
     LxInstanceMountSynthetic(Ns, "/sys", "sysfs", "sysfs", LX_MS_NOSUID | LX_MS_NODEV | LX_MS_NOEXEC,
@@ -1216,6 +1222,34 @@ LxMountInheritNamespaces(
     }
 }
 
+static
+LONG
+LxInstanceMountDrvfs(
+    _In_ PLX_PROCESS Process,
+    _In_ PLX_NS Ns,
+    _In_ PCSTR Target,
+    _In_ PCSTR Source,
+    _In_ ULONG Flags,
+    _In_opt_ PCSTR Data,
+    _Out_ PLX_MOUNT *Mount)
+{
+    LX_DRVFS_OPTIONS Options;
+    UNICODE_STRING NtRoot;
+    PSTR Display;
+    LONG Error;
+
+    Error = LxDrvfsParseOptions(Process, Data, &Options);
+    if (Error != 0)
+        return Error;
+    Error = LxDrvfsParseSource(Source, &NtRoot, &Display);
+    if (Error != 0)
+        return Error;
+    Error = LxInstanceMountNt(Ns, Target, Display, "drvfs", Flags, &NtRoot, LX_MAGIC_NTFS, &Options, Mount);
+    LxFree(NtRoot.Buffer);
+    LxFree(Display);
+    return Error;
+}
+
 LONG
 LxMountAdd(
     _In_ PLX_PROCESS Process,
@@ -1271,6 +1305,8 @@ LxMountAdd(
         Error = LxInstanceMountSynthetic(Ns, Target, Source, "devpts", Flags, LxFsDevpts, LX_MAGIC_DEVPTS, &Mount);
     else if (strcmp(FsType, "mqueue") == 0)
         Error = LxInstanceMountSynthetic(Ns, Target, Source, "mqueue", Flags, LxFsMqueue, LX_MAGIC_MQUEUE, &Mount);
+    else if (strcmp(FsType, "drvfs") == 0)
+        Error = LxInstanceMountDrvfs(Process, Ns, Target, Source, Flags, Data, &Mount);
     else
         return -LX_ENODEV;
     if (Error == 0)
@@ -1499,6 +1535,8 @@ LxMountClone(
     Mount->PidNs = Source->PidNs;
     Mount->NsFile = Source->NsFile;
     Mount->Tmpfs = Source->Tmpfs;
+    Mount->Drvfs = Source->Drvfs;
+    Mount->DrvfsOptions = Source->DrvfsOptions;
     if (Source->Kind == LxFsNt)
     {
         UNICODE_STRING Root;
@@ -2513,6 +2551,7 @@ LxMountInfoNs(
         {
             PLX_MOUNT Mount = CONTAINING_RECORD(Entry, LX_MOUNT, Link);
             CHAR Options[64];
+            CHAR Super[96];
             size_t Remaining = Size - Used;
             PCSTR Target = Mount->Target;
             PSTR End, EscapedRoot, EscapedTarget, EscapedSource;
@@ -2527,6 +2566,7 @@ LxMountInfoNs(
                 Target = (Target[RootLength] == '\0') ? "/" : Target + RootLength;
             }
             LxMountOptions(Mount, Options, sizeof(Options));
+            LxDrvfsFormatOptions(Mount, Super, sizeof(Super));
             EscapedRoot = LxMountEscape(Mount->Root);
             EscapedTarget = LxMountEscape(Target);
             EscapedSource = LxMountEscape(Mount->Source);
@@ -2545,18 +2585,19 @@ LxMountInfoNs(
                 if (Mount->Unbindable)
                     RtlStringCbCatA(Optional, sizeof(Optional), " unbindable");
                 Status = RtlStringCbPrintfExA(Buffer + Used, Remaining, &End, NULL, 0,
-                                              "%lu %lu 0:%lu %s %s %s%s - %s %s %s\n",
+                                              "%lu %lu 0:%lu %s %s %s%s - %s %s %s%s\n",
                                               Mount->Id, Mount->ParentId, Mount->Dev & 0xFF,
                                               (EscapedRoot != NULL) ? EscapedRoot : Mount->Root,
                                               (EscapedTarget != NULL) ? EscapedTarget : Target, Options, Optional,
                                               Mount->FsType, (EscapedSource != NULL) ? EscapedSource : Mount->Source,
-                                              (Mount->Flags & LX_MS_RDONLY) ? "ro" : "rw");
+                                              (Mount->Flags & LX_MS_RDONLY) ? "ro" : "rw", Super);
             }
             else
             {
-                Status = RtlStringCbPrintfExA(Buffer + Used, Remaining, &End, NULL, 0, "%s %s %s %s 0 0\n",
+                Status = RtlStringCbPrintfExA(Buffer + Used, Remaining, &End, NULL, 0, "%s %s %s %s%s 0 0\n",
                                               (EscapedSource != NULL) ? EscapedSource : Mount->Source,
-                                              (EscapedTarget != NULL) ? EscapedTarget : Target, Mount->FsType, Options);
+                                              (EscapedTarget != NULL) ? EscapedTarget : Target, Mount->FsType, Options,
+                                              Super);
             }
             LxFree(EscapedRoot);
             LxFree(EscapedTarget);
@@ -4035,7 +4076,8 @@ LxVfsOpenNode(
             ULONG NewMode = LX_S_IFREG | (Mode & ~Process->Umask & 07777), Uid, Gid;
 
             LxVfsNewOwner(Process, Node->Path, &NewMode, &Uid, &Gid);
-            LxNtWriteLxAttributes(Handle, NewMode, Uid, Gid, 0, FALSE);
+            if (!Node->Mount->Drvfs || Node->Mount->DrvfsOptions.Metadata)
+                LxNtWriteLxAttributes(Handle, NewMode, Uid, Gid, 0, FALSE);
             LxVcacheInvalidate();
             LxInotifyEvent(Process, Node->Path, 0x00000100, FALSE);
         }
@@ -4519,9 +4561,13 @@ LxVfsMkdir(
                            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &Handle);
     if (Error != 0)
         return Error;
-    LxNtWriteLxAttributes(Handle, Mode, Uid, Gid, 0, FALSE);
-    CaseSensitive.Flags = FILE_CS_FLAG_CASE_SENSITIVE_DIR;
-    ZwSetInformationFile(Handle, &Iosb, &CaseSensitive, sizeof(CaseSensitive), FileCaseSensitiveInformation);
+    if (!Node->Mount->Drvfs || Node->Mount->DrvfsOptions.Metadata)
+        LxNtWriteLxAttributes(Handle, Mode, Uid, Gid, 0, FALSE);
+    if (!Node->Mount->Drvfs)
+    {
+        CaseSensitive.Flags = FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+        ZwSetInformationFile(Handle, &Iosb, &CaseSensitive, sizeof(CaseSensitive), FileCaseSensitiveInformation);
+    }
     ZwClose(Handle);
     LxVcacheInvalidate();
     LxInotifyEvent(Process, Node->Path, 0x00000100 | 0x40000000, FALSE);
@@ -4941,7 +4987,8 @@ LxVfsSetAttributes(
     ULONG OldMode, OldUid, OldGid;
     ULONG64 Device;
     LX_STAT Stat;
-    BOOLEAN Close = FALSE;
+    PLX_MOUNT NtMount = (File != NULL) ? File->Mount : ((Node != NULL) ? Node->Mount : NULL);
+    BOOLEAN Close = FALSE, Stored = TRUE;
     LONG Error;
 
     if (LxTmpfsFileInode(File) != NULL)
@@ -4987,13 +5034,22 @@ LxVfsSetAttributes(
     {
         PLX_FILE Temporary = LxFileFromNtHandle(Handle, LX_O_PATH);
 
+        Stored = FALSE;
         OldMode = 0;
         OldUid = OldGid = 0;
         if (Temporary != NULL)
         {
             Temporary->Handle = NULL;
-            if (LxNtStatHandleType(Handle, &Stat) == 0)
+            if ((NtMount != NULL) && NtMount->Drvfs && (LxNtStatHandle(Handle, NtMount, &Stat) == 0))
+            {
                 OldMode = Stat.Mode;
+                OldUid = Stat.Uid;
+                OldGid = Stat.Gid;
+            }
+            else if (LxNtStatHandleType(Handle, &Stat) == 0)
+            {
+                OldMode = Stat.Mode;
+            }
             LxFileDereference(Temporary);
         }
     }
@@ -5048,6 +5104,10 @@ LxVfsSetAttributes(
         LxTmpfsInodeSetAttributes(Inode, OldMode, OldUid, OldGid);
         LxTmpfsInodeDereference(Inode);
         Error = 0;
+    }
+    else if (!Stored && (NtMount != NULL) && NtMount->Drvfs && !NtMount->DrvfsOptions.Metadata)
+    {
+        Error = (Mode != MAXULONG) ? LxDrvfsSetMode(Handle, OldMode) : 0;
     }
     else
     {
