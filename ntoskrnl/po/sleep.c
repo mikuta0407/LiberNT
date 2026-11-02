@@ -92,6 +92,8 @@ PopUpdateSleepCapabilities(VOID)
                                !Disabled[PoDisabledStateSleeping2];
     PopCapabilities.SystemS3 = PopStateHandlers[PowerStateSleeping3].Handler != NULL &&
                                !Disabled[PoDisabledStateSleeping3];
+    PopCapabilities.SystemS4 = PopStateHandlers[PowerStateSleeping4].Handler != NULL &&
+                               !Disabled[PoDisabledStateSleeping4];
 }
 
 static
@@ -110,6 +112,25 @@ PopIsSleepStateEnabled(
         default:
             return FALSE;
     }
+}
+
+BOOLEAN
+NTAPI
+PopIsHibernateDisabled(VOID)
+{
+    PPOP_SLEEP_DISABLE Disable;
+    PLIST_ENTRY Entry;
+    BOOLEAN Disabled = FALSE;
+
+    KeAcquireGuardedMutex(&PopStateHandlerLock);
+    for (Entry = PopSleepDisableList.Flink; Entry != &PopSleepDisableList; Entry = Entry->Flink)
+    {
+        Disable = CONTAINING_RECORD(Entry, POP_SLEEP_DISABLE, Link);
+        Disabled |= Disable->Reason.AffectedState[PoDisabledStateSleeping4];
+    }
+    KeReleaseGuardedMutex(&PopStateHandlerLock);
+
+    return Disabled;
 }
 
 VOID
@@ -318,7 +339,7 @@ PopGetHibernateHandler(
     BOOLEAN Found;
 
     KeAcquireGuardedMutex(&PopStateHandlerLock);
-    Found = PopStateHandlers[PowerStateSleeping4].Handler != NULL && PopHiberIsReady();
+    Found = PopCapabilities.SystemS4 && PopHiberIsReady();
     if (Found)
         *Handler = PopStateHandlers[PowerStateSleeping4];
     KeReleaseGuardedMutex(&PopStateHandlerLock);
