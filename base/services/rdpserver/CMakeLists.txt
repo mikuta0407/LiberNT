@@ -3,20 +3,25 @@
 # PURPOSE:     Stage a MinGW build of the RDP console server into the images
 # COPYRIGHT:   Copyright 2026 Ahmed ARIF <arif193@gmail.com>
 
-if(NOT ARCH STREQUAL "amd64")
-    message(FATAL_ERROR "RDPSERVER_DIR holds an x86_64 build; it can only be staged into amd64 images.")
-endif()
-
 set(_rdpserver_bin "${RDPSERVER_DIR}/bin")
 set(_rdpserver_files
     "${_rdpserver_bin}/rdpserver.exe"
     "${_rdpserver_bin}/libfreerdp3.dll"
     "${_rdpserver_bin}/libfreerdp-server3.dll"
-    "${_rdpserver_bin}/libwinpr3.dll"
-    "${_rdpserver_bin}/libssl-3-x64.dll"
-    "${_rdpserver_bin}/libcrypto-3-x64.dll"
-    "${_rdpserver_bin}/libgcc_s_seh-1.dll"
-    "${_rdpserver_bin}/libwinpthread-1.dll")
+    "${_rdpserver_bin}/libwinpr3.dll")
+if(ARCH STREQUAL "amd64")
+    list(APPEND _rdpserver_files
+        "${_rdpserver_bin}/libssl-3-x64.dll"
+        "${_rdpserver_bin}/libcrypto-3-x64.dll"
+        "${_rdpserver_bin}/libgcc_s_seh-1.dll"
+        "${_rdpserver_bin}/libwinpthread-1.dll")
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND _rdpserver_files
+        "${_rdpserver_bin}/libssl-3.dll"
+        "${_rdpserver_bin}/libcrypto-3.dll")
+else()
+    message(FATAL_ERROR "RDPSERVER_DIR can only be staged into amd64 and arm64 images.")
+endif()
 set(_rdpserver_modules "${_rdpserver_bin}/ossl-modules/legacy.dll")
 set(_rdpserver_licenses
     "${RDPSERVER_DIR}/licenses/FreeRDP-LICENSE"
@@ -31,17 +36,12 @@ add_cd_file(FILE ${_rdpserver_files} DESTINATION reactos/system32/rdpserver FOR 
 add_cd_file(FILE ${_rdpserver_modules} DESTINATION reactos/system32/rdpserver/ossl-modules FOR livecd preinstall)
 add_cd_file(FILE ${_rdpserver_licenses} DESTINATION reactos/system32/rdpserver/licenses FOR livecd preinstall)
 
-# The in-tree configuration keeps the server disabled. Credentials and the TLS
-# key pair belong to a private directory outside the source tree.
+# A private rdpserver.ini, such as one with a file transfer root, replaces the in-tree one.
 if(RDPSERVER_CONFIG_DIR)
     if(NOT EXISTS "${RDPSERVER_CONFIG_DIR}/rdpserver.ini")
         message(FATAL_ERROR "RDPSERVER_CONFIG_DIR has no rdpserver.ini: ${RDPSERVER_CONFIG_DIR}")
     endif()
-    file(GLOB _rdpserver_config LIST_DIRECTORIES false
-        "${RDPSERVER_CONFIG_DIR}/rdpserver.ini"
-        "${RDPSERVER_CONFIG_DIR}/*.crt"
-        "${RDPSERVER_CONFIG_DIR}/*.key"
-        "${RDPSERVER_CONFIG_DIR}/*.pem")
+    set(_rdpserver_config "${RDPSERVER_CONFIG_DIR}/rdpserver.ini")
 else()
     set(_rdpserver_config "${CMAKE_CURRENT_SOURCE_DIR}/rdpserver.ini")
 endif()

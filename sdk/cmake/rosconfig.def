@@ -335,22 +335,20 @@ config RDPSERVER_DIR
     prompt "RDP console server build directory"
     type string
     default ""
-    depends ARCH=amd64
     help
-      Install directory of a MinGW build of base/services/rdpserver
-      (bin/ and licenses/). The live and preinstalled images then carry the
-      server and start it with the interactive desktop; its in-tree
-      rdpserver.ini keeps it disabled. Empty leaves the server out.
+      Install directory of an x86_64 or aarch64 MinGW build of
+      base/services/rdpserver (bin/ and licenses/) for an amd64 or arm64
+      image. The live and preinstalled images then carry the server, which
+      listens while Remote Desktop is turned on in Settings. Empty leaves
+      the server out.
 
 config RDPSERVER_CONFIG_DIR
     prompt "RDP console server private configuration directory"
     type string
     default ""
-    depends ARCH=amd64
     help
-      Directory outside the source tree with an rdpserver.ini that enables
-      the server, and its TLS certificate and key. Empty keeps the
-      disabled in-tree configuration.
+      Directory outside the source tree with an rdpserver.ini, for example
+      one with a file transfer root. Empty keeps the in-tree configuration.
 
 endmenu
 
