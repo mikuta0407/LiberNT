@@ -987,7 +987,7 @@ static VOID NtfsGetFirstNameFromPath(PCHAR Buffer, PCSTR Path)
     Buffer[i] = 0;
 }
 
-static BOOLEAN NtfsLookupFile(PNTFS_VOLUME_INFO Volume, PCSTR FileName, PNTFS_MFT_RECORD MftRecord, PNTFS_FILE_HANDLE FileHandle)
+static BOOLEAN NtfsLookupPath(PNTFS_VOLUME_INFO Volume, PCSTR FileName, ULONGLONG *MftIndex)
 {
     ULONG NumberOfPathParts;
     ULONG i;
@@ -1018,7 +1018,16 @@ static BOOLEAN NtfsLookupFile(PNTFS_VOLUME_INFO Volume, PCSTR FileName, PNTFS_MF
         }
     }
 
-    if (!NtfsReadMftRecord(Volume, CurrentMFTIndex, MftRecord))
+    *MftIndex = CurrentMFTIndex;
+    return TRUE;
+}
+
+static BOOLEAN NtfsLookupFile(PNTFS_VOLUME_INFO Volume, PCSTR FileName, PNTFS_MFT_RECORD MftRecord, PNTFS_FILE_HANDLE FileHandle)
+{
+    ULONGLONG CurrentMFTIndex;
+
+    if (!NtfsLookupPath(Volume, FileName, &CurrentMFTIndex) ||
+        !NtfsReadMftRecord(Volume, CurrentMFTIndex, MftRecord))
     {
         return FALSE;
     }
@@ -1030,6 +1039,66 @@ static BOOLEAN NtfsLookupFile(PNTFS_VOLUME_INFO Volume, PCSTR FileName, PNTFS_MF
     }
 
     return TRUE;
+}
+
+BOOLEAN
+NtfsPathExists(
+    _In_ PNTFS_VOLUME_INFO Volume,
+    _In_ PCSTR Path)
+{
+    ULONGLONG MftIndex;
+
+    return NtfsLookupPath(Volume, Path, &MftIndex);
+}
+
+BOOLEAN
+NtfsHasDataStream(
+    _In_ PNTFS_VOLUME_INFO Volume,
+    _In_ PCSTR Path,
+    _In_ PCWSTR Stream)
+{
+    PNTFS_MFT_RECORD MftRecord;
+    PNTFS_ATTR_CONTEXT Context = NULL;
+    ULONGLONG MftIndex;
+
+    MftRecord = FwAllocate(Volume->MftRecordSize);
+    if (!MftRecord)
+        return FALSE;
+
+    if (NtfsLookupPath(Volume, Path, &MftIndex) && NtfsReadMftRecord(Volume, MftIndex, MftRecord))
+        Context = NtfsFindAttribute(Volume, MftRecord, MftIndex, NTFS_ATTR_TYPE_DATA, Stream);
+
+    if (Context)
+        NtfsReleaseAttributeContext(Context);
+    FwFree(MftRecord);
+    return Context != NULL;
+}
+
+BOOLEAN
+NtfsVolumeIsDirty(
+    _In_ PNTFS_VOLUME_INFO Volume)
+{
+    PNTFS_MFT_RECORD MftRecord;
+    PNTFS_ATTR_CONTEXT Context = NULL;
+    UCHAR Information[12];
+    BOOLEAN Dirty = TRUE;
+
+    MftRecord = FwAllocate(Volume->MftRecordSize);
+    if (!MftRecord)
+        return TRUE;
+
+    if (NtfsReadMftRecord(Volume, NTFS_FILE_VOLUME, MftRecord))
+        Context = NtfsFindAttribute(Volume, MftRecord, NTFS_FILE_VOLUME, NTFS_ATTR_TYPE_VOLUME_INFORMATION, L"");
+
+    if (Context)
+    {
+        if (NtfsReadAttribute(Volume, Context, 0, (PCHAR)Information, sizeof(Information)) == sizeof(Information))
+            Dirty = (*(PUSHORT)(Information + 10) & NTFS_VOLUME_IS_DIRTY) != 0;
+        NtfsReleaseAttributeContext(Context);
+    }
+
+    FwFree(MftRecord);
+    return Dirty;
 }
 
 PVOID

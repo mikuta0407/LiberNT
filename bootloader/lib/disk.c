@@ -29,6 +29,19 @@ typedef struct _DK_CACHE_TAG
 } DK_CACHE_TAG;
 
 static PUCHAR DkBounce;
+
+static
+BOOLEAN
+DkReadBlocks(
+    _In_ PDK_DEVICE Device,
+    _In_ ULONGLONG Block,
+    _In_ ULONG Count,
+    _Out_ PVOID Buffer)
+{
+    return Device->Virtual ? VdReadBlocks(Device->Virtual, Block, Count, Buffer) :
+                             FwReadBlocks(Device->Firmware, Block, Count, Buffer);
+}
+
 static PUCHAR DkCache;
 static DK_CACHE_TAG DkCacheTags[DK_CACHE_SETS * DK_CACHE_WAYS];
 static UCHAR DkCacheNext[DK_CACHE_SETS];
@@ -64,7 +77,7 @@ DkCacheLine(
     Slot += Way;
 
     DkCacheTags[Slot].Firmware = NULL;
-    if (!FwReadBlocks(Device->Firmware,
+    if (!DkReadBlocks(Device,
                       Line * DK_CACHE_LINE / Device->BlockSize,
                       DK_CACHE_LINE / Device->BlockSize,
                       DkCache + (SIZE_T)Slot * DK_CACHE_LINE))
@@ -125,10 +138,10 @@ DkRead(
     {
         Skip = (ULONG)(Offset % Device->BlockSize);
 
-        if (Skip == 0 && Length >= Device->BlockSize && FwBufferAligned(Device->Firmware, Output))
+        if (Skip == 0 && Length >= Device->BlockSize && (Device->Virtual || FwBufferAligned(Device->Firmware, Output)))
         {
             Chunk = min(Length, DK_DIRECT_SIZE) / Device->BlockSize * Device->BlockSize;
-            if (!FwReadBlocks(Device->Firmware, Offset / Device->BlockSize, Chunk / Device->BlockSize, Output))
+            if (!DkReadBlocks(Device, Offset / Device->BlockSize, Chunk / Device->BlockSize, Output))
                 return FALSE;
 
             Output += Chunk;
@@ -147,7 +160,7 @@ DkRead(
         Chunk = min(Length, DK_BOUNCE_SIZE - Skip);
         Blocks = (Skip + Chunk + Device->BlockSize - 1) / Device->BlockSize;
 
-        if (!FwReadBlocks(Device->Firmware, Offset / Device->BlockSize, Blocks, DkBounce))
+        if (!DkReadBlocks(Device, Offset / Device->BlockSize, Blocks, DkBounce))
             return FALSE;
 
         RtlCopyMemory(Output, DkBounce + Skip, Chunk);
@@ -207,6 +220,9 @@ DkWrite(
         return TRUE;
     }
 
+    if (Device->Virtual)
+        return FALSE;
+
     if (Length != 0)
         DkCacheInvalidate(Device, Offset, Length);
 
@@ -258,7 +274,7 @@ BOOLEAN
 DkFlush(
     _In_ PDK_DEVICE Device)
 {
-    return Device->Memory || FwFlushBlocks(Device->Firmware);
+    return Device->Memory || (!Device->Virtual && FwFlushBlocks(Device->Firmware));
 }
 
 static
@@ -303,6 +319,52 @@ DkFindMbrPartition(
 
 static
 BOOLEAN
+DkGetMbrPartition(
+    _In_ PDK_DEVICE Disk,
+    _In_ ULONG Wanted,
+    _Out_ PDK_DEVICE Partition)
+{
+    UCHAR Sector[512];
+    PUCHAR Entry;
+    ULONG Index, Number;
+
+    if (!DkRead(Disk, 0, sizeof(Sector), Sector) ||
+        Sector[DK_MBR_MAGIC_OFFSET] != 0x55 ||
+        Sector[DK_MBR_MAGIC_OFFSET + 1] != 0xAA)
+    {
+        return FALSE;
+    }
+
+    for (Index = 0, Number = 0; Index < DK_MBR_PARTITIONS; Index++)
+    {
+        Entry = Sector + DK_MBR_TABLE_OFFSET + Index * DK_MBR_ENTRY_SIZE;
+        if (Entry[DK_MBR_TYPE_OFFSET] == 0 || ++Number != Wanted)
+            continue;
+
+        *Partition = *Disk;
+        Partition->Offset = (ULONGLONG)LeUlong(Entry + DK_MBR_START_OFFSET) * Disk->BlockSize;
+        Partition->Length = (ULONGLONG)LeUlong(Entry + DK_MBR_LENGTH_OFFSET) * Disk->BlockSize;
+        Partition->PartitionNumber = Number;
+        return Partition->Offset <= Disk->Length && Partition->Length <= Disk->Length - Partition->Offset;
+    }
+
+    return FALSE;
+}
+
+BOOLEAN
+DkGetPartition(
+    _In_ PDK_DEVICE Disk,
+    _In_ ULONG Number,
+    _Out_ PDK_DEVICE Partition)
+{
+    UCHAR DiskId[16];
+
+    return GptGetDiskId(Disk, DiskId) ? GptGetPartition(Disk, Number, Partition) :
+                                        DkGetMbrPartition(Disk, Number, Partition);
+}
+
+static
+BOOLEAN
 DkMatchBcdPartition(
     _In_ PBCD_DEVICE BcdDevice,
     _In_ ULONG Index,
@@ -316,6 +378,23 @@ DkMatchBcdPartition(
 }
 
 BOOLEAN
+DkLocatePartition(
+    _In_ PDK_DEVICE Disk,
+    _In_ PCWSTR Path,
+    _Out_ PDK_DEVICE Partition)
+{
+    ULONG Number;
+
+    for (Number = 1; DkGetPartition(Disk, Number, Partition); Number++)
+    {
+        if (FsPathExists(Partition, Path))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+BOOLEAN
 DkOpenBcdDevice(
     _In_ PBCD_DEVICE BcdDevice,
     _Out_ PDK_DEVICE Device)
@@ -323,10 +402,25 @@ DkOpenBcdDevice(
     DK_DEVICE Disk;
     ULONG Index;
 
+    if (BcdDevice->Vhd)
+        return DkOpenVirtualDisk(BcdDevice, Device);
+
     switch (BcdDevice->Type)
     {
         case BcdDeviceBoot:
             return DkLocateBootPartition(Device) || FwGetBootDevice(Device);
+
+        case BcdDeviceLocate:
+            do
+            {
+                for (Index = 0; FwGetDisk(Index, &Disk); Index++)
+                {
+                    Disk.DiskIndex = Index;
+                    if (DkLocatePartition(&Disk, BcdDevice->LocatePath, Device))
+                        return TRUE;
+                }
+            } while (FwRescanDisks());
+            break;
 
         case BcdDeviceGptPartition:
         case BcdDeviceMbrPartition:

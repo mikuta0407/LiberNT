@@ -62,7 +62,8 @@ typedef enum _BCD_DEVICE_TYPE
 {
     BcdDeviceBoot,
     BcdDeviceGptPartition,
-    BcdDeviceMbrPartition
+    BcdDeviceMbrPartition,
+    BcdDeviceLocate
 } BCD_DEVICE_TYPE;
 
 typedef struct _BCD_DEVICE
@@ -72,8 +73,13 @@ typedef struct _BCD_DEVICE
     UCHAR Disk[16];
     ULONGLONG PartitionOffset;
     ULONG Signature;
+    WCHAR LocatePath[BCD_PATH_CHARS];
     BOOLEAN Ramdisk;
     WCHAR RamdiskPath[BCD_PATH_CHARS];
+    BOOLEAN Vhd;
+    WCHAR VhdPath[BCD_PATH_CHARS];
+    ULONG VhdLocateElement;
+    WCHAR VhdLocatePath[BCD_PATH_CHARS];
 } BCD_DEVICE, *PBCD_DEVICE;
 
 PVOID

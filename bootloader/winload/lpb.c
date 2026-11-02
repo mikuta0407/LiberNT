@@ -13,6 +13,7 @@
 #define OSL_ARC_NAME_CHARS       64
 #define OSL_PROFILE_STATUS       2
 #define OSL_RAMDISK_ARC_NAME     "ramdisk(0)"
+#define OSL_VIRTUAL_DISK_ARC_NAME "multi(0)disk(0)vdisk(0)"
 
 typedef struct _OSL_ARC_DISK
 {
@@ -121,7 +122,8 @@ OslAddArcDisk(
 static
 VOID
 OslAddArcDisks(
-    _Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
+    _Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock,
+    _In_ PDK_DEVICE OsDevice)
 {
     PARC_DISK_INFORMATION Information = &OslSystemBlock->ArcDiskInformation;
     CHAR ArcName[OSL_ARC_NAME_CHARS];
@@ -140,6 +142,15 @@ OslAddArcDisks(
 
         RtlStringCbPrintfA(ArcName, sizeof(ArcName), "multi(0)disk(0)rdisk(%lu)", Index);
         OslAddArcDisk(Sector, &Disk, ArcName);
+    }
+
+    if (OsDevice->Virtual)
+    {
+        VdGetDisk(OsDevice, &Disk);
+        if (DkRead(&Disk, 0, sizeof(Sector), Sector))
+        {
+            OslAddArcDisk(Sector, &Disk, OSL_VIRTUAL_DISK_ARC_NAME);
+        }
     }
 
     if (OslGetRamdisk(&Ramdisk, &RamdiskSize))
@@ -201,11 +212,22 @@ OslFinalizeLoaderBlock(
         if (OsDevice->PartitionNumber == 0)
             return FALSE;
 
-        RtlStringCbPrintfA(OslSystemBlock->ArcBootDeviceName,
-                           sizeof(OslSystemBlock->ArcBootDeviceName),
-                           "multi(0)disk(0)rdisk(%lu)partition(%lu)",
-                           OsDevice->DiskIndex,
-                           OsDevice->PartitionNumber);
+        if (OsDevice->Virtual)
+        {
+            RtlStringCbPrintfA(OslSystemBlock->ArcBootDeviceName,
+                               sizeof(OslSystemBlock->ArcBootDeviceName),
+                               "%spartition(%lu)",
+                               OSL_VIRTUAL_DISK_ARC_NAME,
+                               OsDevice->PartitionNumber);
+        }
+        else
+        {
+            RtlStringCbPrintfA(OslSystemBlock->ArcBootDeviceName,
+                               sizeof(OslSystemBlock->ArcBootDeviceName),
+                               "multi(0)disk(0)rdisk(%lu)partition(%lu)",
+                               OsDevice->DiskIndex,
+                               OsDevice->PartitionNumber);
+        }
 
         if (!DkLocateBootPartition(&BootPartition))
             BootPartition = *OsDevice;
@@ -227,7 +249,7 @@ OslFinalizeLoaderBlock(
     LoaderBlock->NtHalPathName = PaToVa(OslSystemBlock->NtHalPathName);
     LoaderBlock->LoadOptions = PaToVa(OslSystemBlock->LoadOptions);
 
-    OslAddArcDisks(LoaderBlock);
+    OslAddArcDisks(LoaderBlock, OsDevice);
 
     OslConvertConfigurationTree();
     LoaderBlock->ConfigurationRoot = PaToVa(LoaderBlock->ConfigurationRoot);

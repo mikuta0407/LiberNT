@@ -82,6 +82,25 @@ FsCloseFile(
     NtfsCloseFile(File);
 }
 
+static
+BOOLEAN
+FsNarrowPath(
+    _In_ PCWSTR Path,
+    _Out_writes_z_(BM_PATH_CHARS) PCHAR AnsiPath)
+{
+    ULONG i;
+
+    for (i = 0; Path[i] != UNICODE_NULL; i++)
+    {
+        if (i >= BM_PATH_CHARS - 1 || Path[i] > 0x7F)
+            return FALSE;
+        AnsiPath[i] = (CHAR)Path[i];
+    }
+    AnsiPath[i] = ANSI_NULL;
+
+    return TRUE;
+}
+
 PVOID
 FsReadFile(
     _In_ PDK_DEVICE Device,
@@ -89,19 +108,67 @@ FsReadFile(
     _Out_ PULONG Size)
 {
     CHAR AnsiPath[BM_PATH_CHARS];
-    ULONG i;
 
     *Size = 0;
 
-    for (i = 0; Path[i] != UNICODE_NULL; i++)
-    {
-        if (i >= RTL_NUMBER_OF(AnsiPath) - 1 || Path[i] > 0x7F)
-            return NULL;
-        AnsiPath[i] = (CHAR)Path[i];
-    }
-    AnsiPath[i] = ANSI_NULL;
+    if (!FsNarrowPath(Path, AnsiPath))
+        return NULL;
 
     return FsReadFileA(Device, AnsiPath, Size);
+}
+
+PVOID
+FsOpenFile(
+    _In_ PDK_DEVICE Device,
+    _In_ PCWSTR Path,
+    _Out_ PULONGLONG Size)
+{
+    CHAR AnsiPath[BM_PATH_CHARS];
+
+    *Size = 0;
+
+    if (!FsNarrowPath(Path, AnsiPath))
+        return NULL;
+
+    return FsOpenFileA(Device, AnsiPath, Size);
+}
+
+BOOLEAN
+FsPathExists(
+    _In_ PDK_DEVICE Device,
+    _In_ PCWSTR Path)
+{
+    CHAR AnsiPath[BM_PATH_CHARS];
+
+    if (!FsNarrowPath(Path, AnsiPath) || (Device->Memory && FsMemoryReader) || !FsMount(Device))
+        return FALSE;
+
+    return FsMountedVolume ? NtfsPathExists(FsMountedVolume, AnsiPath) : ExFatPathExists(AnsiPath);
+}
+
+BOOLEAN
+FsHasDataStream(
+    _In_ PDK_DEVICE Device,
+    _In_ PCWSTR Path,
+    _In_ PCWSTR Stream)
+{
+    CHAR AnsiPath[BM_PATH_CHARS];
+
+    return FsNarrowPath(Path, AnsiPath) &&
+           !(Device->Memory && FsMemoryReader) &&
+           FsMount(Device) &&
+           FsMountedVolume &&
+           NtfsHasDataStream(FsMountedVolume, AnsiPath, Stream);
+}
+
+BOOLEAN
+FsVolumeIsDirty(
+    _In_ PDK_DEVICE Device)
+{
+    return !(Device->Memory && FsMemoryReader) &&
+           FsMount(Device) &&
+           FsMountedVolume &&
+           NtfsVolumeIsDirty(FsMountedVolume);
 }
 
 PCWSTR

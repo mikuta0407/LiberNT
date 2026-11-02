@@ -63,11 +63,13 @@ GptReadHeader(
     return NULL;
 }
 
+static
 BOOLEAN
-GptFindPartition(
+GptLookupPartition(
     _In_ PDK_DEVICE Disk,
     _In_reads_bytes_opt_(16) const UCHAR* DiskId,
-    _In_reads_bytes_(16) const UCHAR* PartitionId,
+    _In_reads_bytes_opt_(16) const UCHAR* PartitionId,
+    _In_ ULONG Wanted,
     _Out_ PDK_DEVICE Partition)
 {
     PUCHAR Header, Entries, Entry;
@@ -108,7 +110,7 @@ GptFindPartition(
                 continue;
 
             Number++;
-            if (!RtlEqualMemory(Entry + GPT_ENTRY_ID_OFFSET, PartitionId, 16))
+            if (PartitionId ? !RtlEqualMemory(Entry + GPT_ENTRY_ID_OFFSET, PartitionId, 16) : Number != Wanted)
                 continue;
 
             First = LeUlonglong(Entry + GPT_ENTRY_FIRST_LBA_OFFSET);
@@ -128,6 +130,25 @@ GptFindPartition(
         FwFree(Entries);
     FwFree(Header);
     return Found;
+}
+
+BOOLEAN
+GptFindPartition(
+    _In_ PDK_DEVICE Disk,
+    _In_reads_bytes_opt_(16) const UCHAR* DiskId,
+    _In_reads_bytes_(16) const UCHAR* PartitionId,
+    _Out_ PDK_DEVICE Partition)
+{
+    return GptLookupPartition(Disk, DiskId, PartitionId, 0, Partition);
+}
+
+BOOLEAN
+GptGetPartition(
+    _In_ PDK_DEVICE Disk,
+    _In_ ULONG Number,
+    _Out_ PDK_DEVICE Partition)
+{
+    return GptLookupPartition(Disk, NULL, NULL, Number, Partition);
 }
 
 BOOLEAN

@@ -354,6 +354,11 @@ OslMain(VOID)
         FwPrint(L"The operating system device was not found.\r\n");
         return;
     }
+    else if (OsDevice.Virtual && !VdAppendBootOption(&OsDevice, Options, sizeof(Options)))
+    {
+        FwPrint(L"The location of the virtual disk does not fit in the load options.\r\n");
+        return;
+    }
     else
     {
         if (OslGetOption(Options, OSL_SYNC_URL_OPTION, Url, sizeof(Url)))

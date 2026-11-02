@@ -21,11 +21,22 @@
 #define BCD_FILE_LENGTH_OFFSET      0x04
 #define BCD_FILE_TYPE_OFFSET        0x08
 #define BCD_FILE_DEVICE_OFFSET      0x0C
+#define BCD_DISK_FILE_PATH_OFFSET   0x14
+#define BCD_DISK_VIRTUAL_OFFSET     0x28
+#define BCD_LOCATE_TYPE_OFFSET      0x10
+#define BCD_LOCATE_ELEMENT_OFFSET   0x14
+#define BCD_LOCATE_PARENT_OFFSET    0x18
+#define BCD_LOCATE_PATH_OFFSET      0x1C
 
 #define BCD_DEVICE_DISK      0
 #define BCD_DEVICE_BOOT      5
 #define BCD_DEVICE_PARTITION 6
+#define BCD_DEVICE_LOCATE    8
 #define BCD_DISK_RAMDISK     3
+#define BCD_DISK_FILE        5
+#define BCD_DISK_VIRTUAL     6
+#define BCD_LOCATE_ELEMENT   0
+#define BCD_LOCATE_PATH      1
 #define BCD_FILE_VERSION     1
 #define BCD_FILE_PATH        5
 #define BCD_PARTITION_GPT    0
@@ -423,6 +434,65 @@ BcdGetBoolean(
 }
 
 static
+VOID
+BcdCopyPath(
+    _In_reads_bytes_(Length) const UCHAR* Data,
+    _In_ ULONG Length,
+    _Out_writes_z_(BCD_PATH_CHARS) PWSTR Path)
+{
+    ULONG Chars = Length / sizeof(WCHAR), i;
+
+    for (i = 0; i < Chars && i < BCD_PATH_CHARS - 1; i++)
+    {
+        Path[i] = Data[i * sizeof(WCHAR)] | (Data[i * sizeof(WCHAR) + 1] << 8);
+        if (Path[i] == UNICODE_NULL)
+            break;
+    }
+
+    Path[i] = UNICODE_NULL;
+}
+
+static
+BOOLEAN
+BcdParseDevice(
+    _In_reads_bytes_(Length) const UCHAR* Data,
+    _In_ ULONG Length,
+    _Out_ PBCD_DEVICE Device,
+    _Out_ PULONG Size);
+
+static
+BOOLEAN
+BcdParseFilePath(
+    _In_reads_bytes_(Length) const UCHAR* File,
+    _In_ ULONG Length,
+    _Out_ PBCD_DEVICE Device,
+    _Out_writes_z_(BCD_PATH_CHARS) PWSTR Path)
+{
+    ULONG FileLength, ParentSize;
+
+    if (Length < BCD_FILE_DEVICE_OFFSET)
+        return FALSE;
+
+    FileLength = LeUlong(File + BCD_FILE_LENGTH_OFFSET);
+    if (LeUlong(File) != BCD_FILE_VERSION ||
+        LeUlong(File + BCD_FILE_TYPE_OFFSET) != BCD_FILE_PATH ||
+        FileLength < BCD_FILE_DEVICE_OFFSET ||
+        FileLength > Length ||
+        !BcdParseDevice(File + BCD_FILE_DEVICE_OFFSET,
+                        FileLength - BCD_FILE_DEVICE_OFFSET,
+                        Device,
+                        &ParentSize))
+    {
+        return FALSE;
+    }
+
+    BcdCopyPath(File + BCD_FILE_DEVICE_OFFSET + ParentSize,
+                FileLength - BCD_FILE_DEVICE_OFFSET - ParentSize,
+                Path);
+    return TRUE;
+}
+
+static
 BOOLEAN
 BcdParseDevice(
     _In_reads_bytes_(Length) const UCHAR* Data,
@@ -430,8 +500,7 @@ BcdParseDevice(
     _Out_ PBCD_DEVICE Device,
     _Out_ PULONG Size)
 {
-    const UCHAR* File;
-    ULONG FileLength, ParentSize, Chars, i;
+    ULONG Parent, ParentSize;
 
     if (Length < BCD_DEVICE_HEADER_LENGTH)
         return FALSE;
@@ -467,44 +536,79 @@ BcdParseDevice(
 
             return FALSE;
 
-        case BCD_DEVICE_DISK:
-            if (Device->Ramdisk ||
-                *Size < BCD_DISK_FILE_OFFSET + BCD_FILE_DEVICE_OFFSET ||
-                LeUlong(Data + BCD_DISK_TYPE_OFFSET) != BCD_DISK_RAMDISK)
-            {
+        case BCD_DEVICE_LOCATE:
+            if (*Size < BCD_LOCATE_PATH_OFFSET)
                 return FALSE;
+
+            Parent = LeUlong(Data + BCD_LOCATE_PARENT_OFFSET);
+            if (Parent == 0)
+            {
+                if (Device->Vhd || LeUlong(Data + BCD_LOCATE_TYPE_OFFSET) != BCD_LOCATE_PATH)
+                    return FALSE;
+
+                Device->Type = BcdDeviceLocate;
+                BcdCopyPath(Data + BCD_LOCATE_PATH_OFFSET, *Size - BCD_LOCATE_PATH_OFFSET, Device->LocatePath);
+                return Device->LocatePath[0] != UNICODE_NULL;
             }
 
-            File = Data + BCD_DISK_FILE_OFFSET;
-            FileLength = LeUlong(File + BCD_FILE_LENGTH_OFFSET);
-            if (LeUlong(File) != BCD_FILE_VERSION ||
-                LeUlong(File + BCD_FILE_TYPE_OFFSET) != BCD_FILE_PATH ||
-                FileLength < BCD_FILE_DEVICE_OFFSET ||
-                FileLength > *Size - BCD_DISK_FILE_OFFSET)
-            {
+            if (Device->Vhd || Parent < BCD_LOCATE_PATH_OFFSET || Parent >= *Size)
                 return FALSE;
-            }
 
-            Device->Ramdisk = TRUE;
-            if (!BcdParseDevice(File + BCD_FILE_DEVICE_OFFSET,
-                                FileLength - BCD_FILE_DEVICE_OFFSET,
-                                Device,
-                                &ParentSize))
+            switch (LeUlong(Data + BCD_LOCATE_TYPE_OFFSET))
             {
-                return FALSE;
-            }
-
-            File += BCD_FILE_DEVICE_OFFSET + ParentSize;
-            Chars = (FileLength - BCD_FILE_DEVICE_OFFSET - ParentSize) / sizeof(WCHAR);
-            for (i = 0; i < Chars && i < RTL_NUMBER_OF(Device->RamdiskPath) - 1; i++)
-            {
-                Device->RamdiskPath[i] = File[i * sizeof(WCHAR)] | (File[i * sizeof(WCHAR) + 1] << 8);
-                if (Device->RamdiskPath[i] == UNICODE_NULL)
+                case BCD_LOCATE_ELEMENT:
+                    Device->VhdLocateElement = LeUlong(Data + BCD_LOCATE_ELEMENT_OFFSET);
                     break;
+
+                case BCD_LOCATE_PATH:
+                    BcdCopyPath(Data + BCD_LOCATE_PATH_OFFSET, Parent - BCD_LOCATE_PATH_OFFSET, Device->VhdLocatePath);
+                    break;
+
+                default:
+                    return FALSE;
             }
 
-            Device->RamdiskPath[i] = UNICODE_NULL;
-            return TRUE;
+            return BcdParseDevice(Data + Parent, *Size - Parent, Device, &ParentSize) && Device->Vhd;
+
+        case BCD_DEVICE_DISK:
+            if (*Size < BCD_DISK_TYPE_OFFSET + sizeof(ULONG))
+                return FALSE;
+
+            switch (LeUlong(Data + BCD_DISK_TYPE_OFFSET))
+            {
+                case BCD_DISK_RAMDISK:
+                    if (Device->Ramdisk || Device->Vhd || *Size < BCD_DISK_FILE_OFFSET)
+                        return FALSE;
+
+                    Device->Ramdisk = TRUE;
+                    return BcdParseFilePath(Data + BCD_DISK_FILE_OFFSET,
+                                            *Size - BCD_DISK_FILE_OFFSET,
+                                            Device,
+                                            Device->RamdiskPath);
+
+                case BCD_DISK_VIRTUAL:
+                    if (Device->Ramdisk || Device->Vhd || *Size < BCD_DISK_VIRTUAL_OFFSET)
+                        return FALSE;
+
+                    Device->Vhd = TRUE;
+                    return BcdParseDevice(Data + BCD_DISK_VIRTUAL_OFFSET,
+                                          *Size - BCD_DISK_VIRTUAL_OFFSET,
+                                          Device,
+                                          &ParentSize) &&
+                           Device->VhdPath[0] != UNICODE_NULL;
+
+                case BCD_DISK_FILE:
+                    if (!Device->Vhd || Device->VhdPath[0] != UNICODE_NULL || *Size < BCD_DISK_FILE_PATH_OFFSET)
+                        return FALSE;
+
+                    return BcdParseFilePath(Data + BCD_DISK_FILE_PATH_OFFSET,
+                                            *Size - BCD_DISK_FILE_PATH_OFFSET,
+                                            Device,
+                                            Device->VhdPath) &&
+                           Device->VhdPath[0] != UNICODE_NULL;
+            }
+
+            return FALSE;
     }
 
     return FALSE;
@@ -524,8 +628,14 @@ BcdGetDevice(
         return FALSE;
 
     RtlZeroMemory(Device, sizeof(*Device));
-    return BcdParseDevice(Data + BCD_ELEMENT_DEVICE_OFFSET,
-                          Length - BCD_ELEMENT_DEVICE_OFFSET,
-                          Device,
-                          &Size);
+    if (!BcdParseDevice(Data + BCD_ELEMENT_DEVICE_OFFSET,
+                        Length - BCD_ELEMENT_DEVICE_OFFSET,
+                        Device,
+                        &Size))
+    {
+        return FALSE;
+    }
+
+    return !Device->VhdLocateElement ||
+           BcdGetString(Object, Device->VhdLocateElement, Device->VhdLocatePath, RTL_NUMBER_OF(Device->VhdLocatePath));
 }
