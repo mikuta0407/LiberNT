@@ -6,7 +6,9 @@
  */
 
 #include <apitest.h>
+#include <ntstatus.h>
 #include <winreg.h>
+#include <ndk/exfuncs.h>
 #include <winioctl.h>
 #include <ntddstor.h>
 #include <ntddscsi.h>
@@ -40,6 +42,120 @@ GetDescriptorString(PSTORAGE_DEVICE_DESCRIPTOR Device, DWORD Offset, PSTR Text, 
         Text[Length - 1] = ANSI_NULL;
 }
 
+static const GUID VendorMicrosoft = {0xec984aec, 0xa0f9, 0x47e9, {0x90, 0x1f, 0x71, 0x41, 0x5a, 0x66, 0x34, 0x5b}};
+
+static PCWSTR
+EntryString(PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE Response, DWORD Bytes, DWORD Offset, DWORD Size, PWSTR Text, DWORD Chars)
+{
+    Text[0] = UNICODE_NULL;
+    if (Offset <= Bytes && Size <= Bytes - Offset && Size / sizeof(WCHAR) < Chars)
+    {
+        memcpy(Text, (PUCHAR)Response + Offset, Size);
+        Text[Size / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+    return Text;
+}
+
+static VOID
+TestDependentVolume(CHAR Drive, DWORD DiskNumber, ULONGLONG DiskSize, PWSTR Host, DWORD HostChars)
+{
+    WIN32_FILE_ATTRIBUTE_DATA Attributes;
+    ULONGLONG FileSize;
+    STORAGE_QUERY_DEPENDENT_VOLUME_REQUEST Request = {2, QUERY_DEPENDENT_VOLUME_REQUEST_FLAG_HOST_VOLUMES};
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE Response;
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_LEV2_ENTRY Entry;
+    WCHAR Path[MAX_PATH], Text[MAX_PATH], Expected[MAX_PATH];
+    UCHAR Buffer[4096];
+    CHAR Name[16];
+    HANDLE Handle;
+    DWORD Bytes;
+    BOOL Result;
+
+    Response = (PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE)Buffer;
+    sprintf(Name, "\\\\.\\%c:", Drive);
+    Handle = CreateFileA(Name, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "Cannot open %s: %lu\n", Name, GetLastError());
+    if (Handle != INVALID_HANDLE_VALUE)
+    {
+        SetLastError(0xdeadbeef);
+        Result = DeviceIoControl(Handle, FSCTL_QUERY_DEPENDENT_VOLUME, &Request, sizeof(Request),
+                                 Buffer, sizeof(Buffer), &Bytes, NULL);
+        ok(!Result && GetLastError() == ERROR_INVALID_FUNCTION,
+           "FSCTL_QUERY_DEPENDENT_VOLUME on the volume returned %d, error %lu\n", Result, GetLastError());
+        CloseHandle(Handle);
+    }
+
+    sprintf(Name, "%c:\\", Drive);
+    Handle = CreateFileA(Name, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "Cannot open %s: %lu\n", Name, GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+        return;
+
+    Result = DeviceIoControl(Handle, FSCTL_QUERY_DEPENDENT_VOLUME, &Request, sizeof(Request),
+                             Buffer, sizeof(Buffer), &Bytes, NULL);
+    ok(Result, "FSCTL_QUERY_DEPENDENT_VOLUME failed: %lu\n", GetLastError());
+    CloseHandle(Handle);
+    if (!Result)
+        return;
+
+    ok(Response->ResponseLevel == 2, "Response level %lu\n", Response->ResponseLevel);
+    ok(Response->NumberEntries == 1, "%lu entries\n", Response->NumberEntries);
+    if (Response->NumberEntries == 0)
+        return;
+
+    Entry = &Response->Lev2Depends[0];
+    ok(Entry->EntryLength == sizeof(*Entry), "Entry length %lu\n", Entry->EntryLength);
+    ok(Entry->DependencyTypeFlags == 0x450, "Dependency flags 0x%lx\n", Entry->DependencyTypeFlags);
+    ok(Entry->ProviderSpecificFlags == 0, "Provider flags 0x%lx\n", Entry->ProviderSpecificFlags);
+    ok(Entry->VirtualStorageType.DeviceId == 3, "Device type %lu\n", Entry->VirtualStorageType.DeviceId);
+    ok(IsEqualGUID(&Entry->VirtualStorageType.VendorId, &VendorMicrosoft),
+       "Vendor %s\n", wine_dbgstr_guid(&Entry->VirtualStorageType.VendorId));
+    ok(Entry->AncestorLevel == 0, "Ancestor level %lu\n", Entry->AncestorLevel);
+
+    EntryString(Response, Bytes, Entry->HostVolumeNameOffset, Entry->HostVolumeNameSize, Host, HostChars);
+    ok(!wcsncmp(Host, L"\\Device\\HarddiskVolume", 22), "Host volume %s\n", wine_dbgstr_w(Host));
+    EntryString(Response, Bytes, Entry->RelativePathOffset, Entry->RelativePathSize, Text, MAX_PATH);
+    ok(Text[0] == L'\\', "Relative path %s\n", wine_dbgstr_w(Text));
+    _snwprintf(Path, MAX_PATH, L"\\\\?\\GLOBALROOT%s%s", Host, Text);
+    ok(GetFileAttributesExW(Path, GetFileExInfoStandard, &Attributes), "Cannot query %s: %lu\n", wine_dbgstr_w(Path), GetLastError());
+    FileSize = ((ULONGLONG)Attributes.nFileSizeHigh << 32) | Attributes.nFileSizeLow;
+    ok(FileSize >= DiskSize && FileSize <= DiskSize + 64 * 1024 * 1024,
+       "The virtual disk file holds %I64u bytes for a %I64u-byte disk\n", FileSize, DiskSize);
+
+    _snwprintf(Path, MAX_PATH, L"%c:", Drive);
+    QueryDosDeviceW(Path, Expected, MAX_PATH);
+    EntryString(Response, Bytes, Entry->DependentVolumeNameOffset, Entry->DependentVolumeNameSize, Text, MAX_PATH);
+    ok(!wcscmp(Text, Expected), "Dependent volume %s, expected %s\n", wine_dbgstr_w(Text), wine_dbgstr_w(Expected));
+
+    _snwprintf(Expected, MAX_PATH, L"\\??\\PhysicalDrive%lu", DiskNumber);
+    EntryString(Response, Bytes, Entry->DependentDeviceNameOffset, Entry->DependentDeviceNameSize, Text, MAX_PATH);
+    ok(!wcscmp(Text, Expected), "Dependent device %s, expected %s\n", wine_dbgstr_w(Text), wine_dbgstr_w(Expected));
+}
+
+static VOID
+TestPagingFile(PCWSTR Host)
+{
+    UCHAR Buffer[1024];
+    PSYSTEM_PAGEFILE_INFORMATION Information = (PSYSTEM_PAGEFILE_INFORMATION)Buffer;
+    WCHAR Drive[3] = L"?:", Device[MAX_PATH], Name[MAX_PATH];
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemPageFileInformation, Buffer, sizeof(Buffer), NULL);
+    ok(Status == STATUS_SUCCESS, "SystemPageFileInformation: 0x%lx\n", Status);
+    if (Status != STATUS_SUCCESS || Information->TotalSize == 0)
+    {
+        ok(0, "No paging file is in use\n");
+        return;
+    }
+
+    lstrcpynW(Name, Information->PageFileName.Buffer, min(MAX_PATH, Information->PageFileName.Length / sizeof(WCHAR) + 1));
+    ok(!wcsncmp(Name, L"\\??\\", 4), "Paging file %s\n", wine_dbgstr_w(Name));
+    Drive[0] = Name[4];
+    QueryDosDeviceW(Drive, Device, MAX_PATH);
+    ok(!wcscmp(Device, Host), "The paging file %s is on %s, not on the host volume %s\n",
+       wine_dbgstr_w(Name), wine_dbgstr_w(Device), wine_dbgstr_w(Host));
+}
+
 START_TEST(VhdBoot)
 {
     UCHAR Buffer[512];
@@ -49,15 +165,16 @@ START_TEST(VhdBoot)
     DISK_GEOMETRY_EX Geometry;
     SYSTEM_POWER_CAPABILITIES Power;
     SCSI_ADDRESS Address;
-    CHAR Path[MAX_PATH], Text[64], BootDevice[MAX_PATH];
+    CHAR Path[MAX_PATH], VolumePath[16], Text[64], BootDevice[MAX_PATH];
+    WCHAR Host[MAX_PATH] = L"";
     DWORD Bytes, Size = sizeof(BootDevice);
     HANDLE Volume, Disk;
     LONG Error;
 
     GetSystemWindowsDirectoryA(Path, sizeof(Path));
-    sprintf(Path, "\\\\.\\%c:", Path[0]);
-    Volume = CreateFileA(Path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    ok(Volume != INVALID_HANDLE_VALUE, "Cannot open %s: %lu\n", Path, GetLastError());
+    sprintf(VolumePath, "\\\\.\\%c:", Path[0]);
+    Volume = CreateFileA(VolumePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Volume != INVALID_HANDLE_VALUE, "Cannot open %s: %lu\n", VolumePath, GetLastError());
     if (Volume == INVALID_HANDLE_VALUE)
         return;
 
@@ -108,6 +225,9 @@ START_TEST(VhdBoot)
     ok(Error == ERROR_SUCCESS, "SystemBootDevice: %ld\n", Error);
     ok(Error != ERROR_SUCCESS || !strncmp(BootDevice, BOOT_DEVICE_PREFIX, sizeof(BOOT_DEVICE_PREFIX) - 1),
        "SystemBootDevice is %s\n", BootDevice);
+
+    TestDependentVolume(VolumePath[4], Extents.Extents[0].DiskNumber, Geometry.DiskSize.QuadPart, Host, MAX_PATH);
+    TestPagingFile(Host);
 
     ok(GetPwrCapabilities(&Power), "GetPwrCapabilities failed: %lu\n", GetLastError());
     ok(!Power.SystemS4, "Hibernation is available\n");
