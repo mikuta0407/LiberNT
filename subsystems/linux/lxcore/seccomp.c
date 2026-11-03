@@ -632,7 +632,7 @@ LxSeccompLog(
     LxKlogPrintf(5, "audit: type=1326 audit(%lld.%03lld:%lu): auid=4294967295 uid=%lu gid=%lu ses=4294967295 "
                  "pid=%lu comm=\"%s\" exe=\"%s\" sig=%ld arch=%lx syscall=%lu compat=0 ip=0x%llx code=0x%lx",
                  Time.Seconds, Time.Nanoseconds / 1000000, (ULONG)InterlockedIncrement(&LxAuditSerial),
-                 Process->Uid[0], Process->Gid[0], Process->Pid, Call->Thread->Comm,
+                 LxCred(Process)->Uid[0], LxCred(Process)->Gid[0], Process->Pid, Call->Thread->Comm,
                  (Process->ExePath != NULL) ? Process->ExePath : "", Signal, LxSeccompAuditArch(), Call->Number,
                  LxArchGetUserPc(Call->TrapFrame), Action);
 }

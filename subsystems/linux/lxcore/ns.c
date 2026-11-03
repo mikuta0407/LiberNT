@@ -350,16 +350,16 @@ LxUserNsCreate(
     *Result = NULL;
     if (Parent->Level > LX_USERNS_MAX_PARENT_LEVEL)
         return -LX_ENOSPC;
-    if (!LxUserNsCharge(Parent, Process->Uid[1]))
+    if (!LxUserNsCharge(Parent, LxCred(Process)->Uid[1]))
         return -LX_ENOSPC;
     Root = LxProcessRoot(Process);
     Chrooted = (Root == NULL) || (strcmp(Root, "/") != 0);
     LxFree(Root);
-    if (Chrooted || (LxIdFromKernel(Parent, FALSE, Process->Uid[1]) == MAXULONG) ||
-        (LxIdFromKernel(Parent, TRUE, Process->Gid[1]) == MAXULONG))
+    if (Chrooted || (LxIdFromKernel(Parent, FALSE, LxCred(Process)->Uid[1]) == MAXULONG) ||
+        (LxIdFromKernel(Parent, TRUE, LxCred(Process)->Gid[1]) == MAXULONG))
     {
         ExAcquireFastMutex(&LxNsLock);
-        LxUserNsUncharge(Parent, Process->Uid[1], NULL);
+        LxUserNsUncharge(Parent, LxCred(Process)->Uid[1], NULL);
         ExReleaseFastMutex(&LxNsLock);
         return (Root == NULL) ? -LX_ENOMEM : -LX_EPERM;
     }
@@ -367,13 +367,13 @@ LxUserNsCreate(
     if (Ns == NULL)
     {
         ExAcquireFastMutex(&LxNsLock);
-        LxUserNsUncharge(Parent, Process->Uid[1], NULL);
+        LxUserNsUncharge(Parent, LxCred(Process)->Uid[1], NULL);
         ExReleaseFastMutex(&LxNsLock);
         return -LX_ENOMEM;
     }
-    Ns->User.OwnerUid = Process->Uid[1];
-    Ns->User.OwnerGid = Process->Gid[1];
-    Ns->User.ParentCouldSetfcap = ((Process->CapEffective >> LX_CAP_SETFCAP) & 1) != 0;
+    Ns->User.OwnerUid = LxCred(Process)->Uid[1];
+    Ns->User.OwnerGid = LxCred(Process)->Gid[1];
+    Ns->User.ParentCouldSetfcap = ((LxCred(Process)->CapEffective >> LX_CAP_SETFCAP) & 1) != 0;
     Ns->User.Charged = TRUE;
     *Result = Ns;
     return 0;
@@ -392,12 +392,13 @@ LxUserNsEnter(
     Old = Process->Ns[LxNsUser];
     Process->Ns[LxNsUser] = UserNs;
     ExReleaseFastMutex(&LxNsLock);
-    Process->SecureBits = 0;
-    Process->CapInheritable = 0;
-    Process->CapAmbient = 0;
-    Process->CapPermitted = LX_CAP_FULL_SET;
-    Process->CapEffective = LX_CAP_FULL_SET;
-    Process->CapBounding = LX_CAP_FULL_SET;
+    LxCred(Process)->SecureBits = 0;
+    LxCred(Process)->CapInheritable = 0;
+    LxCred(Process)->CapAmbient = 0;
+    LxCred(Process)->CapPermitted = LX_CAP_FULL_SET;
+    LxCred(Process)->CapEffective = LX_CAP_FULL_SET;
+    LxCred(Process)->CapBounding = LX_CAP_FULL_SET;
+    LxCredPublish(Process);
     ExReleaseFastMutex(&Process->Lock);
     if (Old != NULL)
         LxNsDereference(Old);
@@ -544,13 +545,13 @@ LxIdMapPermitted(
             }
         }
     }
-    if ((Map->Count == 1) && (Map->Extents[0].Count == 1) && (UserNs->User.OwnerUid == Writer->Uid[1]))
+    if ((Map->Count == 1) && (Map->Extents[0].Count == 1) && (UserNs->User.OwnerUid == LxCred(Writer)->Uid[1]))
     {
         ULONG Id = LxIdToKernel(UserNs->Parent, Group, Map->Extents[0].LowerFirst);
 
-        if (!Group && (Id == Writer->Uid[1]))
+        if (!Group && (Id == LxCred(Writer)->Uid[1]))
             return TRUE;
-        if (Group && UserNs->User.SetgroupsDenied && (Id == Writer->Gid[1]))
+        if (Group && UserNs->User.SetgroupsDenied && (Id == LxCred(Writer)->Gid[1]))
             return TRUE;
     }
     return LxNsCapable(Writer, UserNs->Parent, Group ? LX_CAP_SETGID : LX_CAP_SETUID);

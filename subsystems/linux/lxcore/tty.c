@@ -1556,7 +1556,7 @@ LxPtmxOpen(
     NTSTATUS Status;
 
     *Result = NULL;
-    Status = LxTtyCreate(Process->Instance, Devpts, LX_TTY_LOCKED, Process->Fsuid, Process->Fsgid, 0, 0, &Tty);
+    Status = LxTtyCreate(Process->Instance, Devpts, LX_TTY_LOCKED, LxCred(Process)->Fsuid, LxCred(Process)->Fsgid, 0, 0, &Tty);
     if (Status == STATUS_TOO_MANY_OPENED_FILES)
         return -LX_ENOSPC;
     if (!NT_SUCCESS(Status))

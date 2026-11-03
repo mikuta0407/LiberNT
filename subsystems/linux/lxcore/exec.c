@@ -460,11 +460,11 @@ LxBuildStack(
     LX_AUX(LX_AT_BASE, InterpreterBase);
     LX_AUX(LX_AT_FLAGS, 0);
     LX_AUX(LX_AT_ENTRY, Main->Entry);
-    LX_AUX(LX_AT_UID, LxCredViewId(Process, FALSE, Process->Uid[0]));
-    LX_AUX(LX_AT_EUID, LxCredViewId(Process, FALSE, Process->Uid[1]));
-    LX_AUX(LX_AT_GID, LxCredViewId(Process, TRUE, Process->Gid[0]));
-    LX_AUX(LX_AT_EGID, LxCredViewId(Process, TRUE, Process->Gid[1]));
-    LX_AUX(LX_AT_SECURE, (Process->Uid[0] != Process->Uid[1]) || (Process->Gid[0] != Process->Gid[1]));
+    LX_AUX(LX_AT_UID, LxCredViewId(Process, FALSE, LxCred(Process)->Uid[0]));
+    LX_AUX(LX_AT_EUID, LxCredViewId(Process, FALSE, LxCred(Process)->Uid[1]));
+    LX_AUX(LX_AT_GID, LxCredViewId(Process, TRUE, LxCred(Process)->Gid[0]));
+    LX_AUX(LX_AT_EGID, LxCredViewId(Process, TRUE, LxCred(Process)->Gid[1]));
+    LX_AUX(LX_AT_SECURE, (LxCred(Process)->Uid[0] != LxCred(Process)->Uid[1]) || (LxCred(Process)->Gid[0] != LxCred(Process)->Gid[1]));
     LX_AUX(LX_AT_HWCAP, LxArchHwcap());
     LX_AUX(LX_AT_HWCAP2, LxArchHwcap2());
     LX_AUX(LX_AT_CLKTCK, 100);
@@ -576,16 +576,17 @@ LxApplyRequestUser(
     _In_ PLX_PROCESS Process,
     _In_ PLX_EXEC_REQUEST Request)
 {
-    ULONG Count = min(Request->GroupCount, (ULONG)ARRAYSIZE(Process->Groups));
+    ULONG Count = min(Request->GroupCount, (ULONG)ARRAYSIZE(LxCred(Process)->Groups));
     LX_CRED_SAVE Old;
 
     ExAcquireFastMutex(&Process->Lock);
     LxCredSave(Process, &Old);
-    Process->Uid[0] = Process->Uid[1] = Process->Uid[2] = Process->Fsuid = Request->Uid;
-    Process->Gid[0] = Process->Gid[1] = Process->Gid[2] = Process->Fsgid = Request->Gid;
-    Process->GroupCount = Count;
-    RtlCopyMemory(Process->Groups, Request->Groups, Count * sizeof(ULONG));
+    LxCred(Process)->Uid[0] = LxCred(Process)->Uid[1] = LxCred(Process)->Uid[2] = LxCred(Process)->Fsuid = Request->Uid;
+    LxCred(Process)->Gid[0] = LxCred(Process)->Gid[1] = LxCred(Process)->Gid[2] = LxCred(Process)->Fsgid = Request->Gid;
+    LxCred(Process)->GroupCount = Count;
+    RtlCopyMemory(LxCred(Process)->Groups, Request->Groups, Count * sizeof(ULONG));
     LxCredFixSetuid(Process, &Old, FALSE);
+    LxCredPublish(Process);
     ExReleaseFastMutex(&Process->Lock);
 }
 
@@ -858,13 +859,14 @@ LxExecImage(
     }
     LxCredSave(Process, &Old);
     if (SetUid)
-        Process->Uid[1] = FileUid;
+        LxCred(Process)->Uid[1] = FileUid;
     if (SetGid)
-        Process->Gid[1] = FileGid;
+        LxCred(Process)->Gid[1] = FileGid;
     if (SetUid || SetGid)
         Process->Personality &= ~LX_PER_CLEAR_ON_SETID;
     Process->Personality = LxArchExecPersonality(Process->Personality);
     LxCredExec(Process, &Old);
+    LxCredPublish(Process);
     ExReleaseFastMutex(&Process->Lock);
 
     Randomize = LxMmPickLayout(Process);

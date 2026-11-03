@@ -1281,8 +1281,8 @@ LxMountAdd(
 
         RtlZeroMemory(&Options, sizeof(Options));
         Options.Mode = 01777;
-        Options.Uid = Process->Fsuid;
-        Options.Gid = Process->Fsgid;
+        Options.Uid = LxCred(Process)->Fsuid;
+        Options.Gid = LxCred(Process)->Fsgid;
         Error = Tmpfs ? LxTmpfsParseOptions(Process, Data, &Options) : 0;
         if (Error == 0)
             Error = LxInstanceTmpfs(Ns, Target, FsType, Flags, Options.Mode, &Mount);
@@ -3595,7 +3595,8 @@ LxLookupSearchKey(
     _In_ PCSTR Path)
 {
     static const CHAR Digits[] = "0123456789abcdef";
-    ULONG64 Values[7 + RTL_NUMBER_OF(Process->Groups)];
+    PLX_CRED Cred = LxCred(Process);
+    ULONG64 Values[7 + RTL_NUMBER_OF(Cred->Groups)];
     SIZE_T DirLength = strlen(Dir), PathLength = strlen(Path), Size, Used;
     ULONG Count = 0, Index;
     PSTR Key;
@@ -3606,13 +3607,13 @@ LxLookupSearchKey(
         PathLength--;
     Values[Count++] = DirLength;
     Values[Count++] = PathLength;
-    Values[Count++] = Process->Fsuid;
-    Values[Count++] = Process->Fsgid;
-    Values[Count++] = Process->CapEffective;
+    Values[Count++] = Cred->Fsuid;
+    Values[Count++] = Cred->Fsgid;
+    Values[Count++] = Cred->CapEffective;
     Values[Count++] = (ULONG64)(ULONG_PTR)LxCredUserNs(Process);
-    Values[Count++] = Process->GroupCount;
-    for (Index = 0; (Index < Process->GroupCount) && (Index < RTL_NUMBER_OF(Process->Groups)); Index++)
-        Values[Count++] = Process->Groups[Index];
+    Values[Count++] = Cred->GroupCount;
+    for (Index = 0; (Index < Cred->GroupCount) && (Index < RTL_NUMBER_OF(Cred->Groups)); Index++)
+        Values[Count++] = Cred->Groups[Index];
     Size = (Count * 17) + DirLength + PathLength + 3;
     Key = LxAlloc(Size);
     if (Key == NULL)
@@ -3647,7 +3648,7 @@ LxLookupMaySearch(
     PCSTR Cursor = Path;
     PSTR Dir, Root, Key = NULL, Start = NULL;
     BOOLEAN Checked = FALSE, Complete = TRUE;
-    ULONG Fsuid = Process->Fsuid;
+    ULONG Fsuid = LxCred(Process)->Fsuid;
     LONG64 Generation = LxVcacheGeneration, ModeGeneration = LxVcacheModeGeneration;
     PLX_NS Owner = LxProcessNs(Process, LxNsMnt);
     ULONG Hash = 0;
@@ -4719,7 +4720,7 @@ LxVfsMayDelete(
         return Error;
     if (!LxIdsMapped(Process, Stat.Uid, Stat.Gid))
         return -LX_EPERM;
-    if ((Parent.Mode & LX_S_ISVTX) && (Stat.Uid != Process->Fsuid) && (Parent.Uid != Process->Fsuid) &&
+    if ((Parent.Mode & LX_S_ISVTX) && (Stat.Uid != LxCred(Process)->Fsuid) && (Parent.Uid != LxCred(Process)->Fsuid) &&
         !LxCapableWrtIds(Process, Stat.Uid, Stat.Gid, LX_CAP_FOWNER))
     {
         return -LX_EPERM;
@@ -4738,8 +4739,8 @@ LxVfsNewOwner(
 {
     LX_STAT Parent;
 
-    *Uid = Process->Fsuid;
-    *Gid = Process->Fsgid;
+    *Uid = LxCred(Process)->Fsuid;
+    *Gid = LxCred(Process)->Fsgid;
     if ((LxVfsParentPermission(Process, Path, 0, &Parent) != 0) || !(Parent.Mode & LX_S_ISGID))
         return;
     *Gid = Parent.Gid;
@@ -5209,12 +5210,12 @@ LxApplyAttributes(
     _Inout_ PULONG OldUid,
     _Inout_ PULONG OldGid)
 {
-    if ((Uid != MAXULONG) && !((Process->Fsuid == *OldUid) && (Uid == *OldUid)) &&
+    if ((Uid != MAXULONG) && !((LxCred(Process)->Fsuid == *OldUid) && (Uid == *OldUid)) &&
         !LxCapableWrtIds(Process, *OldUid, *OldGid, LX_CAP_CHOWN))
     {
         return -LX_EPERM;
     }
-    if ((Gid != MAXULONG) && !((Process->Fsuid == *OldUid) && ((Gid == *OldGid) || LxInGroup(Process, Gid))) &&
+    if ((Gid != MAXULONG) && !((LxCred(Process)->Fsuid == *OldUid) && ((Gid == *OldGid) || LxInGroup(Process, Gid))) &&
         !LxCapableWrtIds(Process, *OldUid, *OldGid, LX_CAP_CHOWN))
     {
         return -LX_EPERM;

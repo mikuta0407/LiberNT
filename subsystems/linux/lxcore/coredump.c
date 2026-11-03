@@ -147,8 +147,8 @@ LxCoreExpandPattern(
                 case 'P': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", Process->Pid); break;
                 case 'i': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", LxTidNr(Process, Thread)); break;
                 case 'I': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", Thread->Tid); break;
-                case 'u': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", Process->Uid[0]); break;
-                case 'g': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", Process->Gid[0]); break;
+                case 'u': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", LxCred(Process)->Uid[0]); break;
+                case 'g': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", LxCred(Process)->Gid[0]); break;
                 case 's': RtlStringCbPrintfA(Number, sizeof(Number), "%ld", Signal); break;
                 case 'd': RtlStringCbPrintfA(Number, sizeof(Number), "%lu", Process->Dumpable); break;
                 case 'c':
@@ -369,8 +369,8 @@ LxCoreDump(
     RtlZeroMemory(Info, sizeof(Info));
     Info[0] = 0;
     Info[1] = 'R';
-    *(PULONG)&Info[16] = Process->Uid[0];
-    *(PULONG)&Info[20] = Process->Gid[0];
+    *(PULONG)&Info[16] = LxCred(Process)->Uid[0];
+    *(PULONG)&Info[20] = LxCred(Process)->Gid[0];
     *(PULONG)&Info[24] = LxPidNr(Process, Process);
     *(PULONG)&Info[28] = *(PULONG)&Status[36];
     *(PULONG)&Info[32] = *(PULONG)&Status[40];

@@ -571,6 +571,22 @@ struct _LX_CGROUP
     LONG64 PidsEventsLocal;
 };
 
+typedef struct _LX_CRED
+{
+    ULONG Uid[3];
+    ULONG Gid[3];
+    ULONG Fsuid;
+    ULONG Fsgid;
+    ULONG GroupCount;
+    ULONG Groups[32];
+    ULONG SecureBits;
+    ULONG64 CapInheritable;
+    ULONG64 CapPermitted;
+    ULONG64 CapEffective;
+    ULONG64 CapBounding;
+    ULONG64 CapAmbient;
+} LX_CRED, *PLX_CRED;
+
 struct _LX_PROCESS
 {
     volatile LONG RefCount;
@@ -637,21 +653,10 @@ struct _LX_PROCESS
     LX_POLL_HEAD ExitPoll;
     LX_POLL_HEAD SignalPoll;
     LX_POLL_HEAD ChildPoll;
-    ULONG Uid[3];
-    ULONG Gid[3];
-    ULONG Fsuid;
-    ULONG Fsgid;
-    ULONG GroupCount;
-    ULONG Groups[32];
+    LX_CRED Cred;
     ULONG Dumpable;
     BOOLEAN NoNewPrivs;
     BOOLEAN Execed;
-    ULONG SecureBits;
-    ULONG64 CapInheritable;
-    ULONG64 CapPermitted;
-    ULONG64 CapEffective;
-    ULONG64 CapBounding;
-    ULONG64 CapAmbient;
     ULONG ExitSignal;
     ULONG64 MinFlt;
     LX_USAGE ExitUsage;
@@ -728,6 +733,7 @@ typedef struct _LX_EXEC_REQUEST
 struct _LX_THREAD
 {
     PLX_PROCESS Process;
+    LX_CRED Cred;
     ULONG Tid;
     ULONG NsTid[LX_PIDNS_MAX_LEVEL];
     ULONG NtTid;
@@ -1396,6 +1402,8 @@ BOOLEAN LxIdsMapped(_In_ PLX_PROCESS Process, _In_ ULONG Uid, _In_ ULONG Gid);
 LONG LxVfsNodePermission(_In_ PLX_PROCESS Process, _In_ PLX_NODE Node, _In_ ULONG Mask);
 LONG LxVfsParentPermission(_In_ PLX_PROCESS Process, _In_ PCSTR Path, _In_ ULONG Mask, _Out_opt_ PLX_STAT Parent);
 LONG LxVfsMayDelete(_In_ PLX_PROCESS Process, _In_ PLX_NODE Node);
+PLX_CRED LxCred(_In_ PLX_PROCESS Process);
+VOID LxCredPublish(_Inout_ PLX_PROCESS Process);
 PLX_NS LxCredUserNs(_In_ PLX_PROCESS Process);
 ULONG LxIdToKernel(_In_opt_ PLX_NS UserNs, _In_ BOOLEAN Group, _In_ ULONG Id);
 ULONG LxIdRangeToKernel(_In_ PLX_NS UserNs, _In_ BOOLEAN Group, _In_ ULONG Id, _In_ ULONG Count);

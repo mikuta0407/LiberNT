@@ -1262,7 +1262,7 @@ LX_SYSCALL(LxSysPidfdSendSignal)
         Info.Signo = Signal;
         Info.Code = LX_SI_USER;
         Info.Child.Pid = (LONG)Call->Process->Pid;
-        Info.Child.Uid = Call->Process->Uid[0];
+        Info.Child.Uid = LxCred(Call->Process)->Uid[0];
     }
     if ((Result == 0) && ((Signal < 0) || (Signal > LX_NSIG)))
         Result = -LX_EINVAL;
@@ -1360,7 +1360,7 @@ LX_SYSCALL(LxSysMemfdCreate)
 
     if (!(Flags & LX_MFD_HUGETLB))
     {
-        Result = LxTmpfsCreateAnonymous(LX_S_IFREG | 0777, Call->Process->Fsuid, Call->Process->Fsgid, &File);
+        Result = LxTmpfsCreateAnonymous(LX_S_IFREG | 0777, LxCred(Call->Process)->Fsuid, LxCred(Call->Process)->Fsgid, &File);
         if (Result == 0)
         {
             File->Path = LxStrPrintf("/memfd:%s (deleted)", Name);
