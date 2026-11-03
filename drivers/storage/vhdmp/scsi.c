@@ -414,6 +414,93 @@ VhdQueryProperty(
     return STATUS_SUCCESS;
 }
 
+static
+VOID
+VhdAppendName(
+    _Inout_ PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE Response,
+    _Inout_ PULONG Length,
+    _In_ PCUNICODE_STRING Name,
+    _Out_ PULONG Offset,
+    _Out_ PULONG Size)
+{
+    *Offset = *Length;
+    *Size = Name->Length;
+    RtlCopyMemory((PUCHAR)Response + *Length, Name->Buffer, Name->Length);
+    *(PWCHAR)((PUCHAR)Response + *Length + Name->Length) = UNICODE_NULL;
+    *Length += Name->Length + sizeof(WCHAR);
+}
+
+static
+NTSTATUS
+VhdQueryDependentVolume(
+    _In_ PVHD_PDO_EXTENSION Extension,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_REQUEST Request = Irp->AssociatedIrp.SystemBuffer;
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE Response = Irp->AssociatedIrp.SystemBuffer;
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_LEV2_ENTRY Entry = &Response->Lev2Depends[0];
+    PVHD_DISK Disk = &Extension->Disk;
+    STORAGE_DEVICE_NUMBER Number;
+    WCHAR DeviceBuffer[32];
+    UNICODE_STRING Device;
+    PDEVICE_OBJECT Top;
+    ULONG Level, Flags, Length;
+    NTSTATUS Status;
+
+    if (Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(*Request))
+        return STATUS_INVALID_PARAMETER;
+
+    Level = Request->RequestLevel;
+    Flags = Request->RequestFlags;
+    if (Level != 1 && Level != 2)
+        return STATUS_INVALID_PARAMETER;
+
+    Top = IoGetAttachedDeviceReference(Extension->Common.Self);
+    Status = VhdDeviceIoControl(Top, IOCTL_STORAGE_GET_DEVICE_NUMBER, &Number, sizeof(Number));
+    ObDereferenceObject(Top);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlInitEmptyUnicodeString(&Device, DeviceBuffer, sizeof(DeviceBuffer));
+    RtlUnicodeStringPrintf(&Device, L"\\??\\PhysicalDrive%lu", Number.DeviceNumber);
+
+    Length = Level == 1 ? FIELD_OFFSET(STORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE, Lev1Depends[1]) :
+                          FIELD_OFFSET(STORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE, Lev2Depends[1]) +
+                          Disk->HostVolume.Length + Disk->RelativePath.Length + Device.Length + 3 * sizeof(WCHAR);
+    if (!(Flags & QUERY_DEPENDENT_VOLUME_REQUEST_FLAG_HOST_VOLUMES))
+        Length = FIELD_OFFSET(STORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE, Lev1Depends);
+    if (Stack->Parameters.DeviceIoControl.OutputBufferLength < Length)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    RtlZeroMemory(Response, Length);
+    Response->ResponseLevel = Level;
+    if (!(Flags & QUERY_DEPENDENT_VOLUME_REQUEST_FLAG_HOST_VOLUMES))
+    {
+        Irp->IoStatus.Information = Length;
+        return STATUS_SUCCESS;
+    }
+
+    Response->NumberEntries = 1;
+    Entry->EntryLength = Level == 1 ? sizeof(STORAGE_QUERY_DEPENDENT_VOLUME_LEV1_ENTRY) :
+                                      sizeof(STORAGE_QUERY_DEPENDENT_VOLUME_LEV2_ENTRY);
+    Entry->DependencyTypeFlags = DEPENDENT_DISK_FLAG_SYSTEM_VOLUME | DEPENDENT_DISK_FLAG_REMOVABLE |
+                                 DEPENDENT_DISK_FLAG_PERMANENT_LIFETIME;
+    Entry->VirtualStorageType.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_VHDX;
+    Entry->VirtualStorageType.VendorId = VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT;
+
+    if (Level == 2)
+    {
+        Length = FIELD_OFFSET(STORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE, Lev2Depends[1]);
+        VhdAppendName(Response, &Length, &Disk->HostVolume, &Entry->HostVolumeNameOffset, &Entry->HostVolumeNameSize);
+        VhdAppendName(Response, &Length, &Disk->RelativePath, &Entry->RelativePathOffset, &Entry->RelativePathSize);
+        VhdAppendName(Response, &Length, &Device, &Entry->DependentDeviceNameOffset, &Entry->DependentDeviceNameSize);
+    }
+
+    Irp->IoStatus.Information = Length;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 VhdPdoDeviceControl(
     _In_ PVHD_PDO_EXTENSION Extension,
@@ -427,6 +514,9 @@ VhdPdoDeviceControl(
     {
         case IOCTL_STORAGE_QUERY_PROPERTY:
             return VhdQueryProperty(Extension, Irp);
+
+        case FSCTL_QUERY_DEPENDENT_VOLUME:
+            return VhdQueryDependentVolume(Extension, Irp);
 
         case IOCTL_SCSI_GET_ADDRESS:
             if (Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(SCSI_ADDRESS))

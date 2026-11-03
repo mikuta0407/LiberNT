@@ -19,6 +19,13 @@
 #define VHD_TAG 'mdhV'
 #define VHD_LUN 1
 
+#define VIRTUAL_STORAGE_TYPE_DEVICE_VHDX        3
+#define DEPENDENT_DISK_FLAG_SYSTEM_VOLUME       0x00000010
+#define DEPENDENT_DISK_FLAG_REMOVABLE           0x00000040
+#define DEPENDENT_DISK_FLAG_PERMANENT_LIFETIME  0x00000400
+
+DEFINE_GUID(VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT, 0xec984aec, 0xa0f9, 0x47e9, 0x90, 0x1f, 0x71, 0x41, 0x5a, 0x66, 0x34, 0x5b);
+
 #define VHD_VENDOR   "Msft    "
 #define VHD_PRODUCT  "Virtual Disk    "
 #define VHD_REVISION "1.0 "
@@ -52,6 +59,8 @@ typedef struct _VHD_DISK
     PUCHAR Bounce;
     ULONG BounceSize;
     PUCHAR Zero;
+    UNICODE_STRING HostVolume;
+    UNICODE_STRING RelativePath;
 } VHD_DISK, *PVHD_DISK;
 
 typedef struct _VHD_EXTENSION
@@ -81,6 +90,13 @@ typedef struct _VHD_PDO_EXTENSION
     PVOID SleepToken;
     BOOLEAN Present;
 } VHD_PDO_EXTENSION, *PVHD_PDO_EXTENSION;
+
+NTSTATUS
+VhdDeviceIoControl(
+    _In_ PDEVICE_OBJECT Device,
+    _In_ ULONG IoControlCode,
+    _Out_writes_bytes_(Length) PVOID Output,
+    _In_ ULONG Length);
 
 NTSTATUS
 VhdOpenDisk(

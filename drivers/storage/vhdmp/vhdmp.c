@@ -40,7 +40,6 @@ VhdCompleteIrp(
     return Status;
 }
 
-static
 NTSTATUS
 VhdDeviceIoControl(
     _In_ PDEVICE_OBJECT Device,

@@ -12,6 +12,7 @@
 
 #define VHD_BOUNCE_SIZE  0x10000
 #define VHD_ZERO_SIZE    0x100000
+#define VHD_NAME_SIZE    1024
 
 static
 NTSTATUS
@@ -508,6 +509,52 @@ VhdWriteHeaders(
     return VhdFlush(Disk);
 }
 
+static
+NTSTATUS
+VhdQueryNames(
+    _Inout_ PVHD_DISK Disk,
+    _In_ PDEVICE_OBJECT Volume)
+{
+    POBJECT_NAME_INFORMATION Name;
+    PFILE_NAME_INFORMATION File;
+    IO_STATUS_BLOCK IoStatus;
+    ULONG Length = VHD_NAME_SIZE;
+    NTSTATUS Status;
+
+    Name = ExAllocatePoolWithTag(PagedPool, VHD_NAME_SIZE, VHD_TAG);
+    File = ExAllocatePoolWithTag(PagedPool, VHD_NAME_SIZE, VHD_TAG);
+    if (!Name || !File)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Done;
+    }
+
+    Status = ObQueryNameString(Volume, Name, Length, &Length);
+    if (NT_SUCCESS(Status))
+        Status = ZwQueryInformationFile(Disk->File, &IoStatus, File, VHD_NAME_SIZE, FileNameInformation);
+    if (!NT_SUCCESS(Status))
+        goto Done;
+
+    Disk->RelativePath.Buffer = ExAllocatePoolWithTag(PagedPool, File->FileNameLength, VHD_TAG);
+    if (!Disk->RelativePath.Buffer)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Done;
+    }
+
+    RtlCopyMemory(Disk->RelativePath.Buffer, File->FileName, File->FileNameLength);
+    Disk->RelativePath.Length = Disk->RelativePath.MaximumLength = (USHORT)File->FileNameLength;
+    Disk->HostVolume = Name->Name;
+    Name = NULL;
+
+Done:
+    if (Name)
+        ExFreePoolWithTag(Name, VHD_TAG);
+    if (File)
+        ExFreePoolWithTag(File, VHD_TAG);
+    return Status;
+}
+
 NTSTATUS
 VhdOpenDisk(
     _Out_ PVHD_DISK Disk,
@@ -592,6 +639,10 @@ VhdOpenDisk(
 
     Device = Disk->FileObject->Vpb ? Disk->FileObject->Vpb->RealDevice : Disk->FileObject->DeviceObject;
     Disk->Target = IoGetAttachedDeviceReference(Device);
+    Status = VhdQueryNames(Disk, Device);
+    if (!NT_SUCCESS(Status))
+        goto Fail;
+
     Disk->BounceSize = VHD_BOUNCE_SIZE;
     Disk->Bounce = ExAllocatePoolWithTag(NonPagedPoolNx, VHD_BOUNCE_SIZE, VHD_TAG);
     Disk->Zero = ExAllocatePoolZero(NonPagedPoolNx, VHD_ZERO_SIZE, VHD_TAG);
