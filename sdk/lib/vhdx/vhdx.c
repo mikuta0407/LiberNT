@@ -398,6 +398,9 @@ VhdxOpen(
     if (!NT_SUCCESS(Status))
         return Status;
 
+    Image->MetadataOffset = MetadataOffset;
+    Image->MetadataLength = MetadataLength;
+
     /* TODO: differencing disks, which need the parent chain and the sector bitmaps */
     if (Image->HasParent)
         return STATUS_NOT_SUPPORTED;
@@ -467,6 +470,25 @@ VhdxBatIndex(
     _In_ ULONG Block)
 {
     return Block + Block / Image->ChunkRatio;
+}
+
+ULONGLONG
+VhdxUsedEnd(
+    _In_ PVHDX_IMAGE Image)
+{
+    ULONGLONG End, Entry;
+    ULONG Block;
+
+    End = max(Image->BatOffset + Image->BatLength, Image->MetadataOffset + Image->MetadataLength);
+    End = max(End, Image->LogOffset + Image->LogLength);
+    for (Block = 0; Block < Image->PayloadBlocks; Block++)
+    {
+        Entry = Image->Bat[VhdxBatIndex(Image, Block)];
+        if ((Entry & VHDX_BAT_STATE_MASK) == VHDX_BAT_FULLY_PRESENT)
+            End = max(End, (Entry >> VHDX_BAT_OFFSET_SHIFT) * VHDX_MB + Image->BlockSize);
+    }
+
+    return End;
 }
 
 ULONG

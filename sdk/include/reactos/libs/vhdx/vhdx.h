@@ -37,6 +37,8 @@ typedef struct _VHDX_IMAGE
     ULONG LogLength;
     ULONGLONG BatOffset;
     ULONG BatLength;
+    ULONGLONG MetadataOffset;
+    ULONG MetadataLength;
     ULONGLONG VirtualSize;
     ULONG BlockSize;
     ULONG LogicalSectorSize;
@@ -83,6 +85,10 @@ ULONG
 VhdxBatIndex(
     _In_ PVHDX_IMAGE Image,
     _In_ ULONG Block);
+
+ULONGLONG
+VhdxUsedEnd(
+    _In_ PVHDX_IMAGE Image);
 
 ULONG
 VhdxMap(

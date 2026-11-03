@@ -374,11 +374,11 @@ VhdExpand(
             Missing++;
     }
 
-    Disk->NextFree = ALIGN_UP_BY(Disk->FileSize, VHDX_MB);
-    if (Missing == 0)
+    Disk->NextFree = ALIGN_UP_BY(VhdxUsedEnd(&Disk->Image), VHDX_MB);
+    EndOfFile.EndOfFile.QuadPart = (LONGLONG)(Disk->NextFree + (ULONGLONG)Missing * Disk->Image.BlockSize);
+    if (Missing == 0 || (ULONGLONG)EndOfFile.EndOfFile.QuadPart <= Disk->FileSize)
         return STATUS_SUCCESS;
 
-    EndOfFile.EndOfFile.QuadPart = (LONGLONG)(Disk->NextFree + (ULONGLONG)Missing * Disk->Image.BlockSize);
     Status = ZwSetInformationFile(Disk->File, &IoStatus, &EndOfFile, sizeof(EndOfFile), FileEndOfFileInformation);
     if (!NT_SUCCESS(Status))
     {
