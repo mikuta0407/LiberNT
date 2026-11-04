@@ -66,18 +66,67 @@
  * Module-local state
  * ====================================================================== */
 
-/*
- * The \Device\VideoN device object created by DxgkDisplayRegister.
- * This is the device object that win32ss opens via IoGetDeviceObjectPointer
- * when EngpRegisterGraphicsDevice processes the DEVICEMAP\VIDEO entry.
- */
-PDEVICE_OBJECT g_DisplayDeviceObject = NULL;
+#define DXGKP_DISPLAY_BRIDGE_SIGNATURE  0x56786744UL  /* 'DgxV' */
 
-/*
- * Back-pointer to the adapter that owns this display device.
- * Set during DxgkDisplayRegister, cleared during DxgkDisplayUnregister.
- */
-static PDXGKRNL_ADAPTER g_DisplayAdapter = NULL;
+typedef struct _DXGKP_DISPLAY_BRIDGE
+{
+    ULONG                       Signature;
+    PDEVICE_OBJECT              DeviceObject;
+    PDXGKRNL_ADAPTER            Adapter;
+    EX_RUNDOWN_REF              Rundown;
+    ULONG                       DeviceNumber;
+    BOOLEAN                     InitialModePending;
+    PVOID                       Win32kPhysDisp;
+    PVIDEO_WIN32K_CALLOUT       Win32kCallout;
+} DXGKP_DISPLAY_BRIDGE, *PDXGKP_DISPLAY_BRIDGE;
+
+static KSPIN_LOCK g_DisplayBridgeLock;
+static LONG g_DisplayBridgeCount;
+
+VOID
+DxgkDisplayInitialize(VOID)
+{
+    KeInitializeSpinLock(&g_DisplayBridgeLock);
+}
+
+static
+PDXGKP_DISPLAY_BRIDGE
+DxgkpAcquireDisplayBridge(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    PDXGKP_DISPLAY_BRIDGE Bridge;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&g_DisplayBridgeLock, &OldIrql);
+    Bridge = Adapter->DisplayBridge;
+    if (Bridge != NULL && !ExAcquireRundownProtection(&Bridge->Rundown))
+        Bridge = NULL;
+    KeReleaseSpinLock(&g_DisplayBridgeLock, OldIrql);
+    return Bridge;
+}
+
+static
+PDXGKP_DISPLAY_BRIDGE
+DxgkpDisplayBridgeFromDevice(
+    _In_opt_ PDEVICE_OBJECT DeviceObject)
+{
+    PDXGKP_DISPLAY_BRIDGE Bridge;
+
+    if (DeviceObject == NULL || DeviceObject->DeviceType != FILE_DEVICE_VIDEO)
+        return NULL;
+    Bridge = (PDXGKP_DISPLAY_BRIDGE)DeviceObject->DeviceExtension;
+    if (Bridge == NULL || Bridge->Signature != DXGKP_DISPLAY_BRIDGE_SIGNATURE ||
+        Bridge->DeviceObject != DeviceObject)
+        return NULL;
+    return Bridge;
+}
+
+BOOLEAN
+DxgkIsDisplayBridgeDevice(
+    _In_opt_ PDEVICE_OBJECT DeviceObject)
+{
+    return DxgkpDisplayBridgeFromDevice(DeviceObject) != NULL;
+}
 
 static
 PCWSTR
@@ -100,15 +149,6 @@ DxgkpSelectDisplayDriver(
     return L"cdd";
 }
 
-/*
- * The device number we actually obtained (e.g. 0, 1, 2...).
- * Needed by DxgkDisplayUnregister to delete the correct symbolic link
- * and needed by the registry path writes.
- */
-static ULONG g_DisplayDeviceNumber = 0;
-static BOOLEAN g_DisplayInitialModePending;
-static PVOID g_DisplayWin32kPhysDisp;
-static PVIDEO_WIN32K_CALLOUT g_DisplayWin32kCallout;
 static volatile LONG g_PresentShadowTraceCount = 0;
 static volatile LONG g_PresentDirtyTraceCount = 0;
 static volatile LONG g_ScanoutCopyCount = 0;
@@ -172,13 +212,11 @@ DxgkpRegWriteDword(
                          &Value, sizeof(Value));
 }
 
-/* SharedPrimaryMutex is held after publishing a successful VidPN. The bridge
- * is registered before monitor negotiation finishes, so its POST defaults
- * must be replaced once by the first committed native mode. Later mode changes
- * leave registry persistence to ChangeDisplaySettingsEx. */
+static
 VOID
-DxgkpDisplayPublishInitialMode(
-    _In_ PDXGKRNL_ADAPTER Adapter)
+DxgkpDisplayWriteInitialMode(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ PDXGKP_DISPLAY_BRIDGE Bridge)
 {
     D3DKMT_CURRENTDISPLAYMODE Current;
     WCHAR KeyBuffer[128];
@@ -192,9 +230,6 @@ DxgkpDisplayPublishInitialMode(
     ULONG Values[RTL_NUMBER_OF(Names)];
     BOOLEAN Preferred;
 
-    if (g_DisplayAdapter != Adapter || !g_DisplayInitialModePending ||
-        (!Adapter->VidPnCommitted && !Adapter->HeadlessDesktop))
-        return;
     RtlZeroMemory(&Current, sizeof(Current));
     (VOID)KeWaitForSingleObject(&Adapter->VidPnMutex, Executive, KernelMode, FALSE, NULL);
     if (Adapter->VidPn != NULL && ((PDXGKP_VIDPN)Adapter->VidPn)->NumPaths != 0)
@@ -205,7 +240,7 @@ DxgkpDisplayPublishInitialMode(
         return;
     RtlStringCchPrintfW(KeyBuffer, RTL_NUMBER_OF(KeyBuffer),
                         L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\dxgkrnl\\Device%lu",
-                        g_DisplayDeviceNumber);
+                        Bridge->DeviceNumber);
     RtlInitUnicodeString(&KeyName, KeyBuffer);
     InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
     Status = ZwOpenKey(&Key, KEY_SET_VALUE, &Attributes);
@@ -226,7 +261,27 @@ DxgkpDisplayPublishInitialMode(
     }
     ZwClose(Key);
     if (NT_SUCCESS(Status) && Adapter->VidPnCommitted && Preferred)
-        g_DisplayInitialModePending = FALSE;
+        Bridge->InitialModePending = FALSE;
+}
+
+/* SharedPrimaryMutex is held after publishing a successful VidPN. The bridge
+ * is registered before monitor negotiation finishes, so its POST defaults
+ * must be replaced once by the first committed native mode. Later mode changes
+ * leave registry persistence to ChangeDisplaySettingsEx. */
+VOID
+DxgkpDisplayPublishInitialMode(
+    _In_ PDXGKRNL_ADAPTER Adapter)
+{
+    PDXGKP_DISPLAY_BRIDGE Bridge;
+
+    if (!Adapter->VidPnCommitted && !Adapter->HeadlessDesktop)
+        return;
+    Bridge = DxgkpAcquireDisplayBridge(Adapter);
+    if (Bridge == NULL)
+        return;
+    if (Bridge->InitialModePending)
+        DxgkpDisplayWriteInitialMode(Adapter, Bridge);
+    ExReleaseRundownProtection(&Bridge->Rundown);
 }
 
 VOID
@@ -235,25 +290,31 @@ DxgkDisplayNotifyMonitorEvent(
 {
     VIDEO_WIN32K_CALLBACKS_PARAMS Params;
     PVIDEO_WIN32K_CALLOUT Callout;
+    PDXGKP_DISPLAY_BRIDGE Bridge;
 
     PAGED_CODE();
 
-    if (Adapter == NULL || g_DisplayAdapter != Adapter || !Adapter->VidPnCommitted)
+    if (Adapter == NULL || !Adapter->VidPnCommitted)
         return;
-    Callout = (PVIDEO_WIN32K_CALLOUT)InterlockedCompareExchangePointer((PVOID *)&g_DisplayWin32kCallout, NULL, NULL);
-    if (Callout == NULL)
+    Bridge = DxgkpAcquireDisplayBridge(Adapter);
+    if (Bridge == NULL)
         return;
-    RtlZeroMemory(&Params, sizeof(Params));
-    Params.CalloutType = VideoDxgkMonitorEventCallout;
-    Params.PhysDisp = g_DisplayWin32kPhysDisp;
-    Callout(&Params);
+    Callout = (PVIDEO_WIN32K_CALLOUT)InterlockedCompareExchangePointer((PVOID *)&Bridge->Win32kCallout, NULL, NULL);
+    if (Callout != NULL)
+    {
+        RtlZeroMemory(&Params, sizeof(Params));
+        Params.CalloutType = VideoDxgkMonitorEventCallout;
+        Params.PhysDisp = Bridge->Win32kPhysDisp;
+        Callout(&Params);
+    }
+    ExReleaseRundownProtection(&Bridge->Rundown);
 }
 
 BOOLEAN
 DxgkIsDisplayAdapter(
     _In_ PDXGKRNL_ADAPTER Adapter)
 {
-    return Adapter != NULL && g_DisplayAdapter == Adapter;
+    return Adapter != NULL && Adapter->DisplayBridge != NULL;
 }
 
 /* ========================================================================
@@ -3846,14 +3907,22 @@ DxgkpPointerBridgeSetShape(
 static NTSTATUS
 NTAPI
 DxgkpDisplayDispatch(
-    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PDXGKP_DISPLAY_BRIDGE Bridge,
     _In_ PIRP           Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS           Status = STATUS_NOT_SUPPORTED;
     ULONG              BytesReturned = 0;
+    PDXGKRNL_ADAPTER   Adapter;
 
-    UNREFERENCED_PARAMETER(DeviceObject);
+    if (!ExAcquireRundownProtection(&Bridge->Rundown))
+    {
+        Irp->IoStatus.Status = STATUS_DEVICE_REMOVED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_DEVICE_REMOVED;
+    }
+    Adapter = Bridge->Adapter;
 
     switch (Stack->Parameters.DeviceIoControl.IoControlCode)
     {
@@ -3874,8 +3943,8 @@ DxgkpDisplayDispatch(
                 Stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(VIDEO_WIN32K_CALLBACKS))
             {
                 /* Return the physical device object for PnP queries */
-                if (g_DisplayAdapter != NULL)
-                    Callbacks->pPhysDeviceObject = g_DisplayAdapter->PhysicalDeviceObject;
+                if (Adapter != NULL)
+                    Callbacks->pPhysDeviceObject = Adapter->PhysicalDeviceObject;
                 else
                     Callbacks->pPhysDeviceObject = NULL;
 
@@ -3883,8 +3952,8 @@ DxgkpDisplayDispatch(
                 Callbacks->DualviewFlags = 0;
                 if (Irp->RequestorMode == KernelMode && Callbacks->Callout != NULL)
                 {
-                    g_DisplayWin32kPhysDisp = Callbacks->PhysDisp;
-                    InterlockedExchangePointer((PVOID *)&g_DisplayWin32kCallout, (PVOID)Callbacks->Callout);
+                    Bridge->Win32kPhysDisp = Callbacks->PhysDisp;
+                    InterlockedExchangePointer((PVOID *)&Bridge->Win32kCallout, (PVOID)Callbacks->Callout);
                 }
                 BytesReturned = sizeof(VIDEO_WIN32K_CALLBACKS);
                 Status = STATUS_SUCCESS;
@@ -3954,14 +4023,14 @@ DxgkpDisplayDispatch(
                 Stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(VIDEO_NUM_MODES))
             {
                 Status = STATUS_NOT_SUPPORTED;
-                if (g_DisplayAdapter != NULL &&
-                    g_DisplayAdapter->MiniportContext != NULL &&
-                    (!g_DisplayAdapter->MiniportContext->IsBasicDisplayFallback ||
-                     g_DisplayAdapter->MiniportContext->BasicDisplayNegotiatesModes))
+                if (Adapter != NULL &&
+                    Adapter->MiniportContext != NULL &&
+                    (!Adapter->MiniportContext->IsBasicDisplayFallback ||
+                     Adapter->MiniportContext->BasicDisplayNegotiatesModes))
                 {
-                    DxgkVidPnDestroyDisplayModeCache(g_DisplayAdapter);
-                    Status = DxgkVidPnQueryVideoModes(g_DisplayAdapter, NULL, 0, &NumModes->NumModes, FALSE);
-                    if (!NT_SUCCESS(Status) && !g_DisplayAdapter->MiniportContext->IsDisplayOnlyDriver)
+                    DxgkVidPnDestroyDisplayModeCache(Adapter);
+                    Status = DxgkVidPnQueryVideoModes(Adapter, NULL, 0, &NumModes->NumModes, FALSE);
+                    if (!NT_SUCCESS(Status) && !Adapter->MiniportContext->IsDisplayOnlyDriver)
                         break;
                 }
                 if (!NT_SUCCESS(Status))
@@ -3992,34 +4061,34 @@ DxgkpDisplayDispatch(
             if (ModeInfo != NULL &&
                 Stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(VIDEO_MODE_INFORMATION))
             {
-                if (g_DisplayAdapter != NULL &&
-                    g_DisplayAdapter->MiniportContext != NULL &&
-                    (!g_DisplayAdapter->MiniportContext->IsBasicDisplayFallback ||
-                     g_DisplayAdapter->MiniportContext->BasicDisplayNegotiatesModes))
+                if (Adapter != NULL &&
+                    Adapter->MiniportContext != NULL &&
+                    (!Adapter->MiniportContext->IsBasicDisplayFallback ||
+                     Adapter->MiniportContext->BasicDisplayNegotiatesModes))
                 {
                     ULONG ModeCount;
 
-                    Status = DxgkVidPnQueryVideoModes(g_DisplayAdapter, ModeInfo,
+                    Status = DxgkVidPnQueryVideoModes(Adapter, ModeInfo,
                                 Stack->Parameters.DeviceIoControl.OutputBufferLength / sizeof(*ModeInfo),
                                 &ModeCount, Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VIDEO_QUERY_CURRENT_MODE);
                     if (NT_SUCCESS(Status))
                         BytesReturned = ModeCount * sizeof(*ModeInfo);
-                    if (NT_SUCCESS(Status) || !g_DisplayAdapter->MiniportContext->IsDisplayOnlyDriver)
+                    if (NT_SUCCESS(Status) || !Adapter->MiniportContext->IsDisplayOnlyDriver)
                         break;
                 }
-                DxgkpSnapshotCommittedDisplayState(g_DisplayAdapter, &CommittedWidth, &CommittedHeight, NULL);
+                DxgkpSnapshotCommittedDisplayState(Adapter, &CommittedWidth, &CommittedHeight, NULL);
                 RtlZeroMemory(ModeInfo, sizeof(VIDEO_MODE_INFORMATION));
 
                 ModeInfo->Length = sizeof(VIDEO_MODE_INFORMATION);
                 ModeInfo->ModeIndex = 0;
                 ModeInfo->VisScreenWidth = CommittedWidth != 0 ?
                                            CommittedWidth :
-                                           (g_DisplayAdapter && g_DisplayAdapter->PostDisplayWidth) ?
-                                           g_DisplayAdapter->PostDisplayWidth : 1024;
+                                           (Adapter && Adapter->PostDisplayWidth) ?
+                                           Adapter->PostDisplayWidth : 1024;
                 ModeInfo->VisScreenHeight = CommittedHeight != 0 ?
                                             CommittedHeight :
-                                            (g_DisplayAdapter && g_DisplayAdapter->PostDisplayHeight) ?
-                                            g_DisplayAdapter->PostDisplayHeight : 768;
+                                            (Adapter && Adapter->PostDisplayHeight) ?
+                                            Adapter->PostDisplayHeight : 768;
                 ModeInfo->ScreenStride = ModeInfo->VisScreenWidth * 4;
                 ModeInfo->NumberOfPlanes = 1;
                 ModeInfo->BitsPerPlane = 32;
@@ -4057,7 +4126,7 @@ DxgkpDisplayDispatch(
                 Status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
-            Status = DxgkVidPnSetVideoMode(g_DisplayAdapter, Mode->RequestedMode);
+            Status = DxgkVidPnSetVideoMode(Adapter, Mode->RequestedMode);
             break;
         }
 
@@ -4096,23 +4165,23 @@ DxgkpDisplayDispatch(
                 BOOLEAN StartTimer;
                 BOOLEAN SnapshotHeld = TRUE;
 
-                if (g_DisplayAdapter == NULL)
+                if (Adapter == NULL)
                 {
                     Status = STATUS_DEVICE_NOT_READY;
                     break;
                 }
 
-                if (g_DisplayAdapter->MiniportContext != NULL &&
-                    !g_DisplayAdapter->MiniportContext->IsDisplayOnlyDriver)
+                if (Adapter->MiniportContext != NULL &&
+                    !Adapter->MiniportContext->IsDisplayOnlyDriver)
                 {
                     Status = DxgkpEnsureSharedDisplaySurfaces(
-                                 g_DisplayAdapter,
+                                 Adapter,
                                  0);
                     if (!NT_SUCCESS(Status))
                         break;
                 }
 
-                Status = DxgkpAcquireSharedSurfaceSnapshot(g_DisplayAdapter, &SharedSurface);
+                Status = DxgkpAcquireSharedSurfaceSnapshot(Adapter, &SharedSurface);
                 if (!NT_SUCCESS(Status))
                     break;
                 Width = SharedSurface.CommittedWidth != 0 ? SharedSurface.CommittedWidth : 1024;
@@ -4160,40 +4229,40 @@ DxgkpDisplayDispatch(
                         Status = STATUS_INVALID_BUFFER_SIZE;
                         break;
                     }
-                    InterlockedIncrement(&g_DisplayAdapter->ShadowFbMapCount);
+                    InterlockedIncrement(&Adapter->ShadowFbMapCount);
                 }
                 else
                 {
                     DxgkpReleaseSharedSurfaceSnapshot(&SharedSurface);
                     SnapshotHeld = FALSE;
-                    DxgkpStopPresentTimer(g_DisplayAdapter);
-                    (VOID)KeWaitForSingleObject(&g_DisplayAdapter->SharedPrimaryMutex, Executive, KernelMode, FALSE, NULL);
-                    DxgkpBeginSharedSurfaceMutationLocked(g_DisplayAdapter);
-                    if (g_DisplayAdapter->ShadowFbPoolOwned)
+                    DxgkpStopPresentTimer(Adapter);
+                    (VOID)KeWaitForSingleObject(&Adapter->SharedPrimaryMutex, Executive, KernelMode, FALSE, NULL);
+                    DxgkpBeginSharedSurfaceMutationLocked(Adapter);
+                    if (Adapter->ShadowFbPoolOwned)
                     {
-                        if (g_DisplayAdapter->ShadowFbMapCount > 0)
+                        if (Adapter->ShadowFbMapCount > 0)
                         {
-                            OldFb = g_DisplayAdapter->RetiredShadowFb;
-                            g_DisplayAdapter->RetiredShadowFb = g_DisplayAdapter->ShadowFb;
+                            OldFb = Adapter->RetiredShadowFb;
+                            Adapter->RetiredShadowFb = Adapter->ShadowFb;
                         }
                         else
                         {
-                            OldFb = g_DisplayAdapter->ShadowFb;
+                            OldFb = Adapter->ShadowFb;
                         }
                     }
-                    g_DisplayAdapter->ShadowFb = FbVa;
-                    g_DisplayAdapter->ShadowFbPitch = Width * 4;
-                    g_DisplayAdapter->ShadowFbSize = FbSize;
-                    g_DisplayAdapter->ShadowFbPoolOwned = TRUE;
-                    g_DisplayAdapter->ShadowFbMapCount = 1;
-                    DxgkpEndSharedSurfaceMutationLocked(g_DisplayAdapter);
-                    KeReleaseMutex(&g_DisplayAdapter->SharedPrimaryMutex, FALSE);
+                    Adapter->ShadowFb = FbVa;
+                    Adapter->ShadowFbPitch = Width * 4;
+                    Adapter->ShadowFbSize = FbSize;
+                    Adapter->ShadowFbPoolOwned = TRUE;
+                    Adapter->ShadowFbMapCount = 1;
+                    DxgkpEndSharedSurfaceMutationLocked(Adapter);
+                    KeReleaseMutex(&Adapter->SharedPrimaryMutex, FALSE);
                     if (OldFb != NULL)
                         ExFreePoolWithTag(OldFb, TAG_DXGK_DISPLAY);
                 }
 
                 if (StartTimer)
-                    DxgkpStartPresentTimer(g_DisplayAdapter);
+                    DxgkpStartPresentTimer(Adapter);
 
                 MemoryInfo->VideoRamBase = FbVa;
                 MemoryInfo->VideoRamLength = FbSize;
@@ -4223,56 +4292,56 @@ DxgkpDisplayDispatch(
             {
                 RequestedVa = VideoMemory->RequestedVirtualAddress;
             }
-            if (g_DisplayAdapter != NULL)
+            if (Adapter != NULL)
             {
                 PVOID OldFb = NULL;
                 BOOLEAN LastMapping = FALSE;
 
-                (VOID)KeWaitForSingleObject(&g_DisplayAdapter->SharedPrimaryMutex, Executive, KernelMode, FALSE, NULL);
-                if (RequestedVa != NULL && RequestedVa == g_DisplayAdapter->RetiredShadowFb)
+                (VOID)KeWaitForSingleObject(&Adapter->SharedPrimaryMutex, Executive, KernelMode, FALSE, NULL);
+                if (RequestedVa != NULL && RequestedVa == Adapter->RetiredShadowFb)
                 {
-                    OldFb = g_DisplayAdapter->RetiredShadowFb;
-                    g_DisplayAdapter->RetiredShadowFb = NULL;
+                    OldFb = Adapter->RetiredShadowFb;
+                    Adapter->RetiredShadowFb = NULL;
                 }
-                else if (RequestedVa != NULL && RequestedVa == g_DisplayAdapter->RetiredShadowAllocationFb)
+                else if (RequestedVa != NULL && RequestedVa == Adapter->RetiredShadowAllocationFb)
                 {
-                    DxgkpBeginSharedSurfaceMutationLocked(g_DisplayAdapter);
-                    DxgkpDestroyRetiredShadowLocked(g_DisplayAdapter);
-                    DxgkpEndSharedSurfaceMutationLocked(g_DisplayAdapter);
+                    DxgkpBeginSharedSurfaceMutationLocked(Adapter);
+                    DxgkpDestroyRetiredShadowLocked(Adapter);
+                    DxgkpEndSharedSurfaceMutationLocked(Adapter);
                 }
-                else if (!g_DisplayAdapter->ShadowFbPoolOwned &&
+                else if (!Adapter->ShadowFbPoolOwned &&
                          RequestedVa != NULL &&
-                         RequestedVa == g_DisplayAdapter->ShadowFb &&
-                         g_DisplayAdapter->ShadowFbMapCount > 0)
+                         RequestedVa == Adapter->ShadowFb &&
+                         Adapter->ShadowFbMapCount > 0)
                 {
-                    InterlockedDecrement(&g_DisplayAdapter->ShadowFbMapCount);
+                    InterlockedDecrement(&Adapter->ShadowFbMapCount);
                 }
-                else if (g_DisplayAdapter->ShadowFbPoolOwned &&
-                         (RequestedVa == NULL || RequestedVa == g_DisplayAdapter->ShadowFb))
+                else if (Adapter->ShadowFbPoolOwned &&
+                         (RequestedVa == NULL || RequestedVa == Adapter->ShadowFb))
                 {
-                    if (g_DisplayAdapter->ShadowFbMapCount > 1)
-                        g_DisplayAdapter->ShadowFbMapCount--;
+                    if (Adapter->ShadowFbMapCount > 1)
+                        Adapter->ShadowFbMapCount--;
                     else
                         LastMapping = TRUE;
                 }
-                KeReleaseMutex(&g_DisplayAdapter->SharedPrimaryMutex, FALSE);
+                KeReleaseMutex(&Adapter->SharedPrimaryMutex, FALSE);
 
                 if (LastMapping)
                 {
-                    DxgkpStopPresentTimer(g_DisplayAdapter);
-                    (VOID)KeWaitForSingleObject(&g_DisplayAdapter->SharedPrimaryMutex, Executive, KernelMode, FALSE, NULL);
-                    DxgkpBeginSharedSurfaceMutationLocked(g_DisplayAdapter);
-                    if (g_DisplayAdapter->ShadowFbPoolOwned)
+                    DxgkpStopPresentTimer(Adapter);
+                    (VOID)KeWaitForSingleObject(&Adapter->SharedPrimaryMutex, Executive, KernelMode, FALSE, NULL);
+                    DxgkpBeginSharedSurfaceMutationLocked(Adapter);
+                    if (Adapter->ShadowFbPoolOwned)
                     {
-                        OldFb = g_DisplayAdapter->ShadowFb;
-                        g_DisplayAdapter->ShadowFb = NULL;
-                        g_DisplayAdapter->ShadowFbPitch = 0;
-                        g_DisplayAdapter->ShadowFbSize = 0;
-                        g_DisplayAdapter->ShadowFbPoolOwned = FALSE;
-                        g_DisplayAdapter->ShadowFbMapCount = 0;
+                        OldFb = Adapter->ShadowFb;
+                        Adapter->ShadowFb = NULL;
+                        Adapter->ShadowFbPitch = 0;
+                        Adapter->ShadowFbSize = 0;
+                        Adapter->ShadowFbPoolOwned = FALSE;
+                        Adapter->ShadowFbMapCount = 0;
                     }
-                    DxgkpEndSharedSurfaceMutationLocked(g_DisplayAdapter);
-                    KeReleaseMutex(&g_DisplayAdapter->SharedPrimaryMutex, FALSE);
+                    DxgkpEndSharedSurfaceMutationLocked(Adapter);
+                    KeReleaseMutex(&Adapter->SharedPrimaryMutex, FALSE);
                 }
                 if (OldFb != NULL)
                     ExFreePoolWithTag(OldFb, TAG_DXGK_DISPLAY);
@@ -4309,8 +4378,8 @@ DxgkpDisplayDispatch(
                 break;
             }
 
-            if (g_DisplayAdapter == NULL ||
-                InterlockedCompareExchange(&g_DisplayAdapter->SharedSurfaceAvailable, 0, 0) == 0)
+            if (Adapter == NULL ||
+                InterlockedCompareExchange(&Adapter->SharedSurfaceAvailable, 0, 0) == 0)
             {
                 Status = STATUS_DEVICE_NOT_READY;
                 break;
@@ -4372,7 +4441,7 @@ DxgkpDisplayDispatch(
              * therefore no longer held behind the miniport's scan-out copy. */
             if (Flags & DXGK_PRESENT_DIRTY_FLUSH)
             {
-                Status = DxgkpPresentSourceRects(g_DisplayAdapter,
+                Status = DxgkpPresentSourceRects(Adapter,
                                                  Source,
                                                  SourcePitch,
                                                  SourceSize,
@@ -4418,7 +4487,7 @@ DxgkpDisplayDispatch(
                 Status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
-            if (g_DisplayAdapter == NULL)
+            if (Adapter == NULL)
             {
                 Status = STATUS_DEVICE_NOT_READY;
                 break;
@@ -4432,7 +4501,7 @@ DxgkpDisplayDispatch(
             Stats->PresentCalls = (ULONG)InterlockedCompareExchange(&g_PresentCallCount, 0, 0);
             Stats->PresentTotalUs = (ULONGLONG)InterlockedCompareExchange64(&g_PresentCallTotalUs, 0, 0);
             Stats->PresentMaxUs = (ULONGLONG)InterlockedCompareExchange64(&g_PresentCallMaxUs, 0, 0);
-            Stats->HardwarePointerSupported = g_DisplayAdapter->PointerHwSupported ? 1 : 0;
+            Stats->HardwarePointerSupported = Adapter->PointerHwSupported ? 1 : 0;
             Stats->PointerShapeCalls = (ULONG)InterlockedCompareExchange(&g_PointerShapeCallCount, 0, 0);
             Stats->PointerPositionCalls = (ULONG)InterlockedCompareExchange(&g_PointerPositionCallCount, 0, 0);
             Stats->PointerFailures = (ULONG)InterlockedCompareExchange(&g_PointerFailureCount, 0, 0);
@@ -4452,11 +4521,11 @@ DxgkpDisplayDispatch(
                      Stack->Parameters.DeviceIoControl.InputBufferLength != sizeof(*Capture) ||
                      Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(*Capture))
                 Status = STATUS_BUFFER_TOO_SMALL;
-            else if (g_DisplayAdapter == NULL)
+            else if (Adapter == NULL)
                 Status = STATUS_DEVICE_NOT_READY;
             else
             {
-                Status = DxgkpCaptureDesktop(g_DisplayAdapter, Capture);
+                Status = DxgkpCaptureDesktop(Adapter, Capture);
                 if (NT_SUCCESS(Status))
                     BytesReturned = sizeof(*Capture);
             }
@@ -4480,13 +4549,13 @@ DxgkpDisplayDispatch(
                 Status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
-            if (g_DisplayAdapter == NULL)
+            if (Adapter == NULL)
             {
                 Status = STATUS_DEVICE_NOT_READY;
                 break;
             }
 
-            Status = DxgkCreateRedirectionSurface(g_DisplayAdapter, NULL, Create);
+            Status = DxgkCreateRedirectionSurface(Adapter, NULL, Create);
             if (NT_SUCCESS(Status))
                 BytesReturned = sizeof(*Create);
             break;
@@ -4508,13 +4577,13 @@ DxgkpDisplayDispatch(
                 Status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
-            if (g_DisplayAdapter == NULL)
+            if (Adapter == NULL)
             {
                 Status = STATUS_DEVICE_NOT_READY;
                 break;
             }
 
-            Status = DxgkDestroyRedirectionSurface(g_DisplayAdapter, Destroy);
+            Status = DxgkDestroyRedirectionSurface(Adapter, Destroy);
             break;
         }
 
@@ -4537,14 +4606,14 @@ DxgkpDisplayDispatch(
                 Status = STATUS_INFO_LENGTH_MISMATCH;
                 break;
             }
-            if (g_DisplayAdapter == NULL)
+            if (Adapter == NULL)
             {
                 Status = STATUS_DEVICE_NOT_READY;
                 break;
             }
 
             Status = DxgkAssociateRedirectionSurface(
-                         g_DisplayAdapter, Associate);
+                         Adapter, Associate);
             break;
         }
 
@@ -4568,14 +4637,14 @@ DxgkpDisplayDispatch(
                 Status = STATUS_INFO_LENGTH_MISMATCH;
                 break;
             }
-            if (g_DisplayAdapter == NULL)
+            if (Adapter == NULL)
             {
                 Status = STATUS_DEVICE_NOT_READY;
                 break;
             }
 
             Status = DxgkSynchronizeRedirectionSurfaces(
-                         g_DisplayAdapter, Sync, InputLength);
+                         Adapter, Sync, InputLength);
             if (NT_SUCCESS(Status))
                 BytesReturned = Sync->StructSize;
             break;
@@ -4590,7 +4659,7 @@ DxgkpDisplayDispatch(
             ULONG InLen = Stack->Parameters.DeviceIoControl.InputBufferLength;
             ULONG OutLen = Stack->Parameters.DeviceIoControl.OutputBufferLength;
             ULONG BufferBytes = (InLen > OutLen) ? InLen : OutLen;
-            PDXGKRNL_ADAPTER EscapeAdapter = g_DisplayAdapter;
+            PDXGKRNL_ADAPTER EscapeAdapter = Adapter;
             DXGKARG_ESCAPE EscapeArgs;
 
             if (Irp->RequestorMode != KernelMode)
@@ -4657,12 +4726,12 @@ DxgkpDisplayDispatch(
         {
             DXGKRNL_TRACE("DxgkpDisplayDispatch: IOCTL_VIDEO_ENABLE_POINTER\n");
             Status = STATUS_SUCCESS;
-            if (g_DisplayAdapter != NULL &&
-                DxgkpPointerBridgeSupported(g_DisplayAdapter) &&
-                g_DisplayAdapter->PointerShapeValid)
+            if (Adapter != NULL &&
+                DxgkpPointerBridgeSupported(Adapter) &&
+                Adapter->PointerShapeValid)
             {
-                g_DisplayAdapter->PointerVisible = TRUE;
-                Status = DxgkpPointerBridgeSetPosition(g_DisplayAdapter);
+                Adapter->PointerVisible = TRUE;
+                Status = DxgkpPointerBridgeSetPosition(Adapter);
             }
             break;
         }
@@ -4671,12 +4740,12 @@ DxgkpDisplayDispatch(
         {
             DXGKRNL_TRACE("DxgkpDisplayDispatch: IOCTL_VIDEO_DISABLE_POINTER\n");
             Status = STATUS_SUCCESS;
-            if (g_DisplayAdapter != NULL &&
-                DxgkpPointerBridgeSupported(g_DisplayAdapter) &&
-                g_DisplayAdapter->PointerVisible)
+            if (Adapter != NULL &&
+                DxgkpPointerBridgeSupported(Adapter) &&
+                Adapter->PointerVisible)
             {
-                g_DisplayAdapter->PointerVisible = FALSE;
-                Status = DxgkpPointerBridgeSetPosition(g_DisplayAdapter);
+                Adapter->PointerVisible = FALSE;
+                Status = DxgkpPointerBridgeSetPosition(Adapter);
             }
             break;
         }
@@ -4688,8 +4757,8 @@ DxgkpDisplayDispatch(
             ULONG InputLength =
                 Stack->Parameters.DeviceIoControl.InputBufferLength;
 
-            if (g_DisplayAdapter == NULL ||
-                !DxgkpPointerBridgeSupported(g_DisplayAdapter))
+            if (Adapter == NULL ||
+                !DxgkpPointerBridgeSupported(Adapter))
             {
                 Status = STATUS_NOT_SUPPORTED;
                 break;
@@ -4702,7 +4771,7 @@ DxgkpDisplayDispatch(
                 break;
             }
 
-            Status = DxgkpPointerBridgeSetShape(g_DisplayAdapter,
+            Status = DxgkpPointerBridgeSetShape(Adapter,
                                                 Attributes,
                                                 InputLength);
             break;
@@ -4713,8 +4782,8 @@ DxgkpDisplayDispatch(
             PVIDEO_POINTER_POSITION Position =
                 (PVIDEO_POINTER_POSITION)Irp->AssociatedIrp.SystemBuffer;
 
-            if (g_DisplayAdapter == NULL ||
-                !DxgkpPointerBridgeSupported(g_DisplayAdapter))
+            if (Adapter == NULL ||
+                !DxgkpPointerBridgeSupported(Adapter))
             {
                 Status = STATUS_SUCCESS;
                 break;
@@ -4728,9 +4797,9 @@ DxgkpDisplayDispatch(
                 break;
             }
 
-            g_DisplayAdapter->PointerX = Position->Column;
-            g_DisplayAdapter->PointerY = Position->Row;
-            Status = DxgkpPointerBridgeSetPosition(g_DisplayAdapter);
+            Adapter->PointerX = Position->Column;
+            Adapter->PointerY = Position->Row;
+            Status = DxgkpPointerBridgeSetPosition(Adapter);
             break;
         }
 
@@ -4739,8 +4808,8 @@ DxgkpDisplayDispatch(
             PVIDEO_POINTER_POSITION Position =
                 (PVIDEO_POINTER_POSITION)Irp->AssociatedIrp.SystemBuffer;
 
-            if (g_DisplayAdapter == NULL ||
-                !DxgkpPointerBridgeSupported(g_DisplayAdapter) ||
+            if (Adapter == NULL ||
+                !DxgkpPointerBridgeSupported(Adapter) ||
                 Position == NULL ||
                 Stack->Parameters.DeviceIoControl.OutputBufferLength <
                     sizeof(VIDEO_POINTER_POSITION))
@@ -4749,8 +4818,8 @@ DxgkpDisplayDispatch(
                 break;
             }
 
-            Position->Column = (SHORT)g_DisplayAdapter->PointerX;
-            Position->Row = (SHORT)g_DisplayAdapter->PointerY;
+            Position->Column = (SHORT)Adapter->PointerX;
+            Position->Row = (SHORT)Adapter->PointerY;
             BytesReturned = sizeof(VIDEO_POINTER_POSITION);
             Status = STATUS_SUCCESS;
             break;
@@ -4761,8 +4830,8 @@ DxgkpDisplayDispatch(
             PVIDEO_POINTER_CAPABILITIES Caps =
                 (PVIDEO_POINTER_CAPABILITIES)Irp->AssociatedIrp.SystemBuffer;
 
-            if (g_DisplayAdapter == NULL ||
-                !DxgkpPointerBridgeSupported(g_DisplayAdapter))
+            if (Adapter == NULL ||
+                !DxgkpPointerBridgeSupported(Adapter))
             {
                 DXGKRNL_TRACE("DxgkpDisplayDispatch: "
                               "IOCTL_VIDEO_QUERY_POINTER_CAPABILITIES: "
@@ -4781,8 +4850,8 @@ DxgkpDisplayDispatch(
 
             RtlZeroMemory(Caps, sizeof(*Caps));
             Caps->Flags = VIDEO_MODE_ASYNC_POINTER | VIDEO_MODE_COLOR_POINTER;
-            Caps->MaxWidth = g_DisplayAdapter->PointerMaxWidth;
-            Caps->MaxHeight = g_DisplayAdapter->PointerMaxHeight;
+            Caps->MaxWidth = Adapter->PointerMaxWidth;
+            Caps->MaxHeight = Adapter->PointerMaxHeight;
             Caps->HWPtrBitmapStart = (ULONG)-1;
             Caps->HWPtrBitmapEnd = (ULONG)-1;
             BytesReturned = sizeof(VIDEO_POINTER_CAPABILITIES);
@@ -4801,6 +4870,7 @@ DxgkpDisplayDispatch(
             ULONG IoCode = Stack->Parameters.DeviceIoControl.IoControlCode;
             if ((IoCode & 0xFFFF0000) == 0x00230000)
             {
+                ExReleaseRundownProtection(&Bridge->Rundown);
                 Status = DxgkpDispatchBufferedIoctl(Irp, Stack);
                 Irp->IoStatus.Status = Status;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -4812,6 +4882,7 @@ DxgkpDisplayDispatch(
         }
     }
 
+    ExReleaseRundownProtection(&Bridge->Rundown);
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = BytesReturned;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -4944,6 +5015,22 @@ DxgkpRemoveDeviceMapEntry(
                                 sizeof(NewMax));
 }
 
+static
+VOID
+DxgkpCloseDisplayBridge(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ PDXGKP_DISPLAY_BRIDGE Bridge)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&g_DisplayBridgeLock, &OldIrql);
+    Adapter->DisplayBridge = NULL;
+    g_DisplayBridgeCount--;
+    KeReleaseSpinLock(&g_DisplayBridgeLock, OldIrql);
+    ExWaitForRundownProtectionRelease(&Bridge->Rundown);
+    Bridge->Adapter = NULL;
+}
+
 /* ========================================================================
  * DxgkDisplayRegister
  *
@@ -4979,6 +5066,9 @@ DxgkDisplayRegister(
     WCHAR           DeviceBuffer[24];     /* L"\\Device\\Video%lu" */
     WCHAR           DeviceValueName[24];  /* L"\\Device\\Video%lu" */
     WCHAR           DriverKeyBuf[128];    /* dxgkrnl\DeviceN key path */
+    PDEVICE_OBJECT  DeviceObject = NULL;
+    PDXGKP_DISPLAY_BRIDGE Bridge = NULL;
+    KIRQL           OldIrql;
 
     PAGED_CODE();
 
@@ -4990,15 +5080,14 @@ DxgkDisplayRegister(
      * a miniport that deliberately runs headless leaves these fields zero.
      */
 
-    /* Already registered? */
-    if (g_DisplayDeviceObject != NULL)
+    if (Adapter->DisplayBridge != NULL)
     {
-        if (g_DisplayAdapter == Adapter)
-        {
-            DXGKRNL_TRACE("DxgkDisplayRegister: already registered for this adapter\n");
-            return STATUS_SUCCESS;
-        }
-        DXGKRNL_ERR("DxgkDisplayRegister: the ReactOS display bridge already belongs to adapter %p\n", g_DisplayAdapter);
+        DXGKRNL_TRACE("DxgkDisplayRegister: already registered for this adapter\n");
+        return STATUS_SUCCESS;
+    }
+    if (InterlockedCompareExchange(&g_DisplayBridgeCount, 0, 0) != 0)
+    {
+        DXGKRNL_ERR("DxgkDisplayRegister: the ReactOS display bridge already belongs to another adapter\n");
         return STATUS_NOT_SUPPORTED;
     }
 
@@ -5029,18 +5118,18 @@ DxgkDisplayRegister(
 
         Status = IoCreateDevice(
                      GDxgControlDeviceObject->DriverObject,
-                     sizeof(PVOID),  /* DeviceExtension stores adapter pointer */
+                     sizeof(DXGKP_DISPLAY_BRIDGE),
                      &DeviceName,
                      FILE_DEVICE_VIDEO,  /* Match videoprt device type */
                      FILE_DEVICE_SECURE_OPEN,
                      FALSE,
-                     &g_DisplayDeviceObject);
+                     &DeviceObject);
 
         if (NT_SUCCESS(Status))
         {
             /* Success -- we own this device number. */
             DXGKRNL_TRACE("DxgkDisplayRegister: created \\Device\\Video%lu at %p\n",
-                          DeviceNumber, g_DisplayDeviceObject);
+                          DeviceNumber, DeviceObject);
             break;
         }
 
@@ -5065,16 +5154,22 @@ DxgkDisplayRegister(
         return Status;
     }
 
-    /* Store the device number we actually got. */
-    g_DisplayDeviceNumber = DeviceNumber;
-    g_DisplayInitialModePending = TRUE;
+    Bridge = (PDXGKP_DISPLAY_BRIDGE)DeviceObject->DeviceExtension;
+    RtlZeroMemory(Bridge, sizeof(*Bridge));
+    Bridge->Signature = DXGKP_DISPLAY_BRIDGE_SIGNATURE;
+    Bridge->DeviceObject = DeviceObject;
+    Bridge->Adapter = Adapter;
+    ExInitializeRundownProtection(&Bridge->Rundown);
+    Bridge->DeviceNumber = DeviceNumber;
+    Bridge->InitialModePending = TRUE;
     (VOID)RtlStringCchCopyW(Adapter->DisplayDeviceName, RTL_NUMBER_OF(Adapter->DisplayDeviceName), DeviceBuffer);
 
-    /* Store adapter back-pointer in the device extension */
-    *(PDXGKRNL_ADAPTER *)g_DisplayDeviceObject->DeviceExtension = Adapter;
-    g_DisplayAdapter = Adapter;
-    g_DisplayDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-    g_DisplayDeviceObject->Flags |= DO_BUFFERED_IO;
+    KeAcquireSpinLock(&g_DisplayBridgeLock, &OldIrql);
+    Adapter->DisplayBridge = Bridge;
+    g_DisplayBridgeCount++;
+    KeReleaseSpinLock(&g_DisplayBridgeLock, OldIrql);
+    DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+    DeviceObject->Flags |= DO_BUFFERED_IO;
 
     /* ---- Step 2: Write DEVICEMAP\VIDEO registry entries ---- */
 
@@ -5279,14 +5374,12 @@ Cleanup:
     if (hVideoMap)
         ZwClose(hVideoMap);
 
-    if (!NT_SUCCESS(Status) && g_DisplayDeviceObject != NULL)
+    if (!NT_SUCCESS(Status) && Bridge != NULL)
     {
+        DxgkpCloseDisplayBridge(Adapter, Bridge);
         if (DeviceMapEntryWritten)
-            DxgkpRemoveDeviceMapEntry(g_DisplayDeviceNumber);
-        IoDeleteDevice(g_DisplayDeviceObject);
-        g_DisplayDeviceObject = NULL;
-        g_DisplayAdapter = NULL;
-        g_DisplayDeviceNumber = 0;
+            DxgkpRemoveDeviceMapEntry(Bridge->DeviceNumber);
+        IoDeleteDevice(DeviceObject);
         Adapter->DisplayDeviceName[0] = L'\0';
     }
 
@@ -5305,12 +5398,14 @@ DxgkDisplayUnregister(
     _In_ PDXGKRNL_ADAPTER Adapter)
 {
     PVOID OldFb = NULL;
+    PDXGKP_DISPLAY_BRIDGE Bridge;
 
     PAGED_CODE();
 
-    if (Adapter == NULL || g_DisplayAdapter != Adapter)
+    if (Adapter == NULL || Adapter->DisplayBridge == NULL)
         return;
-    if (Adapter != NULL)
+    Bridge = Adapter->DisplayBridge;
+    DxgkpCloseDisplayBridge(Adapter, Bridge);
     {
         DxgkpStopPresentTimer(Adapter);
         (VOID)KeWaitForSingleObject(&Adapter->SharedPrimaryMutex, Executive, KernelMode, FALSE, NULL);
@@ -5335,15 +5430,9 @@ DxgkDisplayUnregister(
             ExFreePoolWithTag(OldFb, TAG_DXGK_DISPLAY);
     }
 
-    if (g_DisplayDeviceObject != NULL)
-    {
-        DXGKRNL_TRACE("DxgkDisplayUnregister: deleting \\Device\\Video%lu\n", g_DisplayDeviceNumber);
-        DxgkpRemoveDeviceMapEntry(g_DisplayDeviceNumber);
-        IoDeleteDevice(g_DisplayDeviceObject);
-        g_DisplayDeviceObject = NULL;
-        g_DisplayAdapter = NULL;
-        g_DisplayDeviceNumber = 0;
-    }
+    DXGKRNL_TRACE("DxgkDisplayUnregister: deleting \\Device\\Video%lu\n", Bridge->DeviceNumber);
+    DxgkpRemoveDeviceMapEntry(Bridge->DeviceNumber);
+    IoDeleteDevice(Bridge->DeviceObject);
     Adapter->DisplayDeviceName[0] = L'\0';
 }
 
@@ -5363,8 +5452,8 @@ DxgkpDisplayPnpDispatch(
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS Status;
-
-    UNREFERENCED_PARAMETER(DeviceObject);
+    PDXGKP_DISPLAY_BRIDGE Bridge = (PDXGKP_DISPLAY_BRIDGE)DeviceObject->DeviceExtension;
+    PDXGKRNL_ADAPTER Adapter;
 
     switch (Stack->MinorFunction)
     {
@@ -5372,28 +5461,29 @@ DxgkpDisplayPnpDispatch(
         {
             if (Stack->Parameters.QueryDeviceRelations.Type == TargetDeviceRelation)
             {
-                if (g_DisplayAdapter != NULL &&
-                    g_DisplayAdapter->PhysicalDeviceObject != NULL)
+                Status = STATUS_DEVICE_NOT_CONNECTED;
+                if (ExAcquireRundownProtection(&Bridge->Rundown))
                 {
-                    PDEVICE_RELATIONS Rel;
-                    Rel = (PDEVICE_RELATIONS)ExAllocatePoolWithTag(
-                              PagedPool, sizeof(DEVICE_RELATIONS), TAG_DXGK_DISPLAY);
-                    if (Rel != NULL)
+                    Adapter = Bridge->Adapter;
+                    if (Adapter->PhysicalDeviceObject != NULL)
                     {
-                        Rel->Count = 1;
-                        Rel->Objects[0] = g_DisplayAdapter->PhysicalDeviceObject;
-                        ObReferenceObject(g_DisplayAdapter->PhysicalDeviceObject);
-                        Irp->IoStatus.Information = (ULONG_PTR)Rel;
-                        Status = STATUS_SUCCESS;
+                        PDEVICE_RELATIONS Rel;
+                        Rel = (PDEVICE_RELATIONS)ExAllocatePoolWithTag(
+                                  PagedPool, sizeof(DEVICE_RELATIONS), TAG_DXGK_DISPLAY);
+                        if (Rel != NULL)
+                        {
+                            Rel->Count = 1;
+                            Rel->Objects[0] = Adapter->PhysicalDeviceObject;
+                            ObReferenceObject(Adapter->PhysicalDeviceObject);
+                            Irp->IoStatus.Information = (ULONG_PTR)Rel;
+                            Status = STATUS_SUCCESS;
+                        }
+                        else
+                        {
+                            Status = STATUS_INSUFFICIENT_RESOURCES;
+                        }
                     }
-                    else
-                    {
-                        Status = STATUS_INSUFFICIENT_RESOURCES;
-                    }
-                }
-                else
-                {
-                    Status = STATUS_DEVICE_NOT_CONNECTED;
+                    ExReleaseRundownProtection(&Bridge->Rundown);
                 }
             }
             else
@@ -5428,7 +5518,7 @@ DxgkDisplayDispatchPnp(
     _In_  PDEVICE_OBJECT DeviceObject,
     _In_  PIRP           Irp)
 {
-    if (DeviceObject != g_DisplayDeviceObject)
+    if (DxgkpDisplayBridgeFromDevice(DeviceObject) == NULL)
         return FALSE;
 
     DxgkpDisplayPnpDispatch(DeviceObject, Irp);
@@ -5450,14 +5540,13 @@ DxgkDisplayDispatchIoctl(
     _In_  PIRP           Irp,
     _Out_ PNTSTATUS      Status)
 {
-    if (DeviceObject == NULL || g_DisplayDeviceObject == NULL ||
-        DeviceObject != g_DisplayDeviceObject)
-    {
+    PDXGKP_DISPLAY_BRIDGE Bridge = DxgkpDisplayBridgeFromDevice(DeviceObject);
+
+    if (Bridge == NULL)
         return FALSE;
-    }
 
     /* DxgkpDisplayDispatch completes the IRP and returns NTSTATUS */
-    *Status = DxgkpDisplayDispatch(DeviceObject, Irp);
+    *Status = DxgkpDisplayDispatch(Bridge, Irp);
     return TRUE;
 }
 
@@ -5471,7 +5560,7 @@ DxgkDisplayDispatchCreate(
     _In_  PDEVICE_OBJECT DeviceObject,
     _In_  PIRP           Irp)
 {
-    if (DeviceObject != g_DisplayDeviceObject)
+    if (DxgkpDisplayBridgeFromDevice(DeviceObject) == NULL)
         return FALSE;
 
     DxgkpDisplayCreate(DeviceObject, Irp);
@@ -5488,7 +5577,7 @@ DxgkDisplayDispatchClose(
     _In_  PDEVICE_OBJECT DeviceObject,
     _In_  PIRP           Irp)
 {
-    if (DeviceObject != g_DisplayDeviceObject)
+    if (DxgkpDisplayBridgeFromDevice(DeviceObject) == NULL)
         return FALSE;
 
     DxgkpDisplayClose(DeviceObject, Irp);

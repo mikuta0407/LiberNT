@@ -4267,6 +4267,7 @@ DxgkpEnsureGlobalInitialization(VOID)
     KeInitializeSpinLock(&DxgkAdapterGlobalListLock);
     InitializeListHead(&DxgkAdapterGlobalListHead);
     KeInitializeSpinLock(&g_PostDisplayOwnerLock);
+    DxgkDisplayInitialize();
     KeInitializeMutex(&g_PostDisplayOwnershipMutex, 0);
     KeInitializeMutex(&g_MiniportRegistrationMutex, 0);
     ExInitializeFastMutex(&DxgkpMapMemoryMutex);
@@ -16711,15 +16712,12 @@ DxgkpMiniportPowerDispatch(
     }
 
     /* Check for display device (\Device\Video0) — not a real power device. */
+    if (DxgkIsDisplayBridgeDevice(DeviceObject))
     {
-        extern PDEVICE_OBJECT g_DisplayDeviceObject;
-        if (g_DisplayDeviceObject != NULL && DeviceObject == g_DisplayDeviceObject)
-        {
-            PoStartNextPowerIrp(Irp);
-            Irp->IoStatus.Status = STATUS_SUCCESS;
-            IoCompleteRequest(Irp, IO_NO_INCREMENT);
-            return STATUS_SUCCESS;
-        }
+        PoStartNextPowerIrp(Irp);
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
     }
 
     Adapter = DXGKRNL_ADAPTER_FROM_DEVOBJ(DeviceObject);
