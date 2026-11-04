@@ -1,0 +1,23 @@
+; LiberNT Remote Display Adapter (live-image preinstall)
+
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\rdpvdd","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\rdpvdd","Group",0x00000000,"Video"
+HKLM,"SYSTEM\CurrentControlSet\Services\rdpvdd","ImagePath",0x00020000,"system32\drivers\rdpvdd.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\rdpvdd","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\rdpvdd","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\rdpvdd\Video","Service",0x00000000,"rdpvdd"
+
+HKLM,"SYSTEM\CurrentControlSet\Enum\ROOT\RDPVDD\0000","DeviceDesc",0x00000000,"LiberNT Remote Display Adapter"
+HKLM,"SYSTEM\CurrentControlSet\Enum\ROOT\RDPVDD\0000","HardwareID",0x00010000,"ROOT\RDPVDD"
+HKLM,"SYSTEM\CurrentControlSet\Enum\ROOT\RDPVDD\0000","Service",0x00000000,"rdpvdd"
+HKLM,"SYSTEM\CurrentControlSet\Enum\ROOT\RDPVDD\0000","Class",0x00000000,"Display"
+HKLM,"SYSTEM\CurrentControlSet\Enum\ROOT\RDPVDD\0000","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
+HKLM,"SYSTEM\CurrentControlSet\Enum\ROOT\RDPVDD\0000","Driver",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}\RdpVdd"
+HKLM,"SYSTEM\CurrentControlSet\Enum\ROOT\RDPVDD\0000","ConfigFlags",0x00010001,0x00000000
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\RdpVdd","Device Description",0x00000000,"LiberNT Remote Display Adapter"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\RdpVdd","DriverDesc",0x00000000,"LiberNT Remote Display Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\RdpVdd","ProviderName",0x00000000,"LiberNT"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\RdpVdd","DriverVersion",0x00000000,"1.0.0.0"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\RdpVdd","MatchingDeviceId",0x00000000,"root\rdpvdd"
