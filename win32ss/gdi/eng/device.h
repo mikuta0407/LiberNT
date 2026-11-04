@@ -55,6 +55,10 @@ DWORD
 EngpGetDisplayDriverAccelerationLevel(
     _In_ PGRAPHICS_DEVICE pGraphicsDevice);
 
+DWORD
+EngpGetDisplayDriverAttachToDesktop(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice);
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
