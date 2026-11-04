@@ -13,7 +13,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
-#include <ntsecapi.h>
 #include <sddl.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -32,11 +31,11 @@
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
-#include <openssl/provider.h>
 #include <openssl/rand.h>
 #include <openssl/x509v3.h>
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/channels/channels.h>
+#include <ntsecapi.h>
 #include "transfer.h"
 
 typedef ULONG (__cdecl *DEBUG_PRINT)(const char *, ...);
@@ -828,7 +827,7 @@ static DWORD WINAPI WaitServiceStop(void *event)
 
 int main(int argc, char **argv)
 {
-    char config[MAX_PATH] = "", modules[MAX_PATH], *separator;
+    char config[MAX_PATH] = "", directory[MAX_PATH], *separator;
     freerdp_listener *listener;
     HANDLE events[32], singleton;
     DWORD count, status;
@@ -853,21 +852,15 @@ int main(int argc, char **argv)
         if (*root && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, root, -1,
                                          TransferRoot, MAX_PATH)) return 2;
     }
-    if (!GetModuleFileNameA(NULL, modules, sizeof(modules))) return 1;
-    separator = strrchr(modules, '\\');
-    if (!separator || (size_t)(separator - modules) + sizeof("\\ossl-modules") > sizeof(modules)) return 1;
+    if (!GetModuleFileNameA(NULL, directory, sizeof(directory))) return 1;
+    separator = strrchr(directory, '\\');
+    if (!separator) return 1;
     *separator = 0;
-    if (snprintf(Certificate, sizeof(Certificate), "%s\\server.crt", modules) >= (int)sizeof(Certificate) ||
-        snprintf(PrivateKey, sizeof(PrivateKey), "%s\\server.key", modules) >= (int)sizeof(PrivateKey)) return 1;
-    strcpy(separator, "\\ossl-modules");
+    if (snprintf(Certificate, sizeof(Certificate), "%s\\server.crt", directory) >= (int)sizeof(Certificate) ||
+        snprintf(PrivateKey, sizeof(PrivateKey), "%s\\server.key", directory) >= (int)sizeof(PrivateKey)) return 1;
     singleton = CreateMutexA(NULL, FALSE, "Local\\LiberNT-RDPServer-Console");
     if (!singleton || GetLastError() == ERROR_ALREADY_EXISTS) { if (singleton) CloseHandle(singleton); return 1; }
     if (WSAStartup(MAKEWORD(2, 2), &winsock)) return 1;
-    SetEnvironmentVariableA("OPENSSL_MODULES", modules);
-    /* OpenSSL's CRT may cache its environment before main. Set its provider
-     * path directly so ReactOS does not fall back to the build-machine path. */
-    if (!OSSL_PROVIDER_set_default_search_path(NULL, modules))
-    { Log("Cannot configure the bundled OpenSSL provider directory"); return 1; }
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT)) return 1;
     if (!EnsureCertificate()) return 2;
     StopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);

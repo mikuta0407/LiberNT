@@ -331,17 +331,6 @@ config ENABLE_ROSV
     help
       Build the ROSV VMX hypervisor driver and its user-mode tools.
 
-config RDPSERVER_DIR
-    prompt "RDP console server build directory"
-    type string
-    default ""
-    help
-      Install directory of an x86_64 or aarch64 MinGW build of
-      base/services/rdpserver (bin/ and licenses/) for an amd64 or arm64
-      image. The live and preinstalled images then carry the server, which
-      listens while Remote Desktop is turned on in Settings. Empty leaves
-      the server out.
-
 config RDPSERVER_CONFIG_DIR
     prompt "RDP console server private configuration directory"
     type string
