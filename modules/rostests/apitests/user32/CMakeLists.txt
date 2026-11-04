@@ -18,6 +18,7 @@ list(APPEND SOURCE
     CursorPresentation.c
     CreateDialog.c
     DisplayChangeBroadcast.c
+    DisplayDeviceAttach.c
     CreateIconFromResourceEx.c
     CoveredWindow.c
     CreateWindowEx.c
