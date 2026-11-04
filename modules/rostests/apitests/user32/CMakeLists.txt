@@ -6,6 +6,7 @@ list(APPEND SOURCE
     CalculatePopupWindowPosition.c
     CallWindowProc.c
     CallbackNesting.c
+    ChangeDisplaySettingsReset.c
     CharFuncs.c
     CloseWindow.c
     ClipboardAccess.c
