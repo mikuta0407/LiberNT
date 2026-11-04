@@ -1005,8 +1005,7 @@ DceResetActiveDCEs(PWND Window)
             }
          }
 
-         if (!GreIsHandleValid(pDCE->hDC) ||
-             (dc = DC_LockDc(pDCE->hDC)) == NULL)
+         if ((dc = DC_LockDcAnyOwner(pDCE->hDC)) == NULL)
          {
             continue;
          }
@@ -1023,6 +1022,11 @@ DceResetActiveDCEs(PWND Window)
             {
                IntCompositionRedirectDC(CurrentWindow, pDCE->hDC, pDCE->DCXFlags, pDCE->hrgnClip, TRUE);
             }
+            continue;
+         }
+         if (GreGetObjectOwner(pDCE->hDC) == GDI_OBJ_HMGR_RESTRICTED)
+         {
+            DC_UnlockDc(dc);
             continue;
          }
          if (Window == CurrentWindow || IntIsChildWindow(Window, CurrentWindow))
