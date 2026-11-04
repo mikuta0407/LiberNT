@@ -35,6 +35,7 @@
 #include <openssl/x509v3.h>
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/channels/channels.h>
+#include <freerdp/server/disp.h>
 #include <ntsecapi.h>
 #include "transfer.h"
 
@@ -49,6 +50,7 @@ static SERVICE_STATUS ServiceState;
 static HANDLE ServiceStopEvent, SessionStopEvent;
 static char ServiceConfig[MAX_PATH];
 static DWORD FrameInterval;
+static volatile LONG DisplayChanged;
 
 #define SERVICE_NAME "LiberNTRDPServer"
 #define SERVICE_STOP_EVENT "Global\\LiberNT-RDPServer-Stop"
@@ -80,6 +82,9 @@ typedef struct DESKTOP_CONTEXT
     ULONGLONG Frames, Updates, Inputs;
     HANDLE Vcm;
     RDP_TRANSFER *Transfer;
+    DispServerContext *Disp;
+    UINT32 DispChannelId;
+    volatile LONG RequestedSize;
 } DESKTOP_CONTEXT;
 
 static void Log(const char *fmt, ...)
@@ -395,6 +400,80 @@ static BOOL SendTiles(DESKTOP_CONTEXT *ctx, UINT32 *count, size_t *length)
     return TRUE;
 }
 
+static UINT MonitorLayout(DispServerContext *disp, const DISPLAY_CONTROL_MONITOR_LAYOUT_PDU *pdu)
+{
+    DESKTOP_CONTEXT *ctx = disp->custom;
+    const DISPLAY_CONTROL_MONITOR_LAYOUT *monitor;
+    UINT32 i;
+    if (!pdu->NumMonitors) return CHANNEL_RC_OK;
+    monitor = &pdu->Monitors[0];
+    for (i = 0; i < pdu->NumMonitors; ++i)
+        if (pdu->Monitors[i].Flags & DISPLAY_CONTROL_MONITOR_PRIMARY) monitor = &pdu->Monitors[i];
+    Log("Client requested a %lux%lu desktop", (ULONG)monitor->Width, (ULONG)monitor->Height);
+    InterlockedExchange(&ctx->RequestedSize, (LONG)MAKELONG(monitor->Height, monitor->Width));
+    return CHANNEL_RC_OK;
+}
+
+static BOOL DispChannelIdAssigned(DispServerContext *disp, UINT32 channelId)
+{
+    ((DESKTOP_CONTEXT *)disp->custom)->DispChannelId = channelId;
+    return TRUE;
+}
+
+static BOOL DvcCreated(void *userdata, UINT32 channelId, INT32 status)
+{
+    DESKTOP_CONTEXT *ctx = userdata;
+    if (!ctx->Disp || channelId != ctx->DispChannelId) return TRUE;
+    if (status < 0) { Log("Client declined the display control channel status=%ld", (long)status); return TRUE; }
+    return ctx->Disp->DisplayControlCaps(ctx->Disp) == CHANNEL_RC_OK;
+}
+
+static void OpenDisplayControl(DESKTOP_CONTEXT *ctx)
+{
+    ctx->Disp = disp_server_context_new(ctx->Vcm);
+    if (!ctx->Disp) return;
+    ctx->Disp->custom = ctx;
+    ctx->Disp->rdpcontext = &ctx->rdp;
+    ctx->Disp->MaxNumMonitors = 1;
+    ctx->Disp->MaxMonitorAreaFactorA = DISPLAY_CONTROL_MAX_MONITOR_WIDTH;
+    ctx->Disp->MaxMonitorAreaFactorB = DISPLAY_CONTROL_MAX_MONITOR_HEIGHT;
+    ctx->Disp->DispMonitorLayout = MonitorLayout;
+    ctx->Disp->ChannelIdAssigned = DispChannelIdAssigned;
+    WTSVirtualChannelManagerSetDVCCreationCallback(ctx->Vcm, DvcCreated, ctx);
+    if (ctx->Disp->Open(ctx->Disp) != CHANNEL_RC_OK) Log("Cannot open the display control channel");
+}
+
+/* The console has one display, so the client's layout picks one of the adapter's modes. */
+static void ApplyRequestedMode(DESKTOP_CONTEXT *ctx)
+{
+    LONG size = InterlockedExchange(&ctx->RequestedSize, 0);
+    DWORD width = HIWORD(size), height = LOWORD(size), index;
+    DEVMODEW current = {0}, mode = {0}, best = {0};
+    BOOL found = FALSE, fits, bestFits = FALSE;
+    LONG status;
+    if (!size) return;
+    current.dmSize = mode.dmSize = sizeof(DEVMODEW);
+    if (!EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &current)) return;
+    for (index = 0; EnumDisplaySettingsW(NULL, index, &mode); ++index)
+    {
+        if (mode.dmBitsPerPel != current.dmBitsPerPel) continue;
+        fits = mode.dmPelsWidth <= width && mode.dmPelsHeight <= height;
+        if (!found || (fits && !bestFits) ||
+            (fits == bestFits && (fits ? mode.dmPelsWidth * mode.dmPelsHeight > best.dmPelsWidth * best.dmPelsHeight
+                                       : mode.dmPelsWidth * mode.dmPelsHeight < best.dmPelsWidth * best.dmPelsHeight)))
+        {
+            best = mode;
+            bestFits = fits;
+            found = TRUE;
+        }
+    }
+    if (!found || (best.dmPelsWidth == current.dmPelsWidth && best.dmPelsHeight == current.dmPelsHeight)) return;
+    best.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
+    status = ChangeDisplaySettingsExW(NULL, &best, NULL, 0, NULL);
+    Log("Display mode %lux%lu for a %lux%lu client: %ld", best.dmPelsWidth, best.dmPelsHeight, width, height, status);
+    if (status == DISP_CHANGE_SUCCESSFUL) InterlockedExchange(&DisplayChanged, TRUE);
+}
+
 static BOOL Capture(DESKTOP_CONTEXT *ctx)
 {
     int x, y, row;
@@ -404,6 +483,7 @@ static BOOL Capture(DESKTOP_CONTEXT *ctx)
     size_t length = 0, limit = freerdp_settings_get_uint32(ctx->rdp.settings, FreeRDP_MultifragMaxRequestSize);
     if (!ctx->Authorized || !ctx->Active || ctx->Suppressed) return TRUE;
     if (!FollowInputDesktop(ctx)) return FALSE;
+    ApplyRequestedMode(ctx);
     if (ctx->Width != GetSystemMetrics(SM_CXSCREEN) || ctx->Height != GetSystemMetrics(SM_CYSCREEN))
     {
         if (!AllocateCapture(ctx) ||
@@ -473,7 +553,10 @@ static void ContextFree(freerdp_peer *peer, rdpContext *rdp)
     INPUT event = {0};
     (void)peer;
     TransferStop(ctx->Transfer);
+    disp_server_context_free(ctx->Disp);
     freerdp_bitmap_planar_context_free(ctx->Planar);
+    if (ctx->Authorized && !Superseded(ctx) && InterlockedExchange(&DisplayChanged, FALSE))
+        Log("Display mode restored: %ld", ChangeDisplaySettingsExW(NULL, NULL, NULL, 0, NULL));
     if (ctx->Vcm) WTSCloseServer(ctx->Vcm);
     /* A disconnected controller must not leave Ctrl/Alt or mouse buttons held. */
     for (i = 0; i < 512; ++i)
@@ -555,7 +638,9 @@ static DWORD WINAPI ClientThread(void *arg)
         status = WaitForMultipleObjects(count + 1, events, FALSE, wait);
         if (status == WAIT_OBJECT_0 || status == WAIT_FAILED) break;
         if (!peer->CheckFileDescriptor(peer)) break;
-        if (!WTSVirtualChannelManagerCheckFileDescriptor(ctx->Vcm)) break;
+        if (!WTSVirtualChannelManagerCheckFileDescriptorEx(ctx->Vcm, peer->activated)) break;
+        if (ctx->Authorized && !ctx->Disp &&
+            WTSVirtualChannelManagerGetDrdynvcState(ctx->Vcm) == DRDYNVC_STATE_READY) OpenDisplayControl(ctx);
         if (!ctx->Authorized && GetTickCount() - started > 30000) break;
         if (Superseded(ctx))
         {

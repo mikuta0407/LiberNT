@@ -65,6 +65,12 @@ a connected session captures 30 frames per second, or the rate
 per second each, up to 60), and sends the changed 64x32 tiles in batched
 bitmap updates.
 
+A client that resizes its window over the display control channel
+(`/dynamic-resolution` in FreeRDP) gets the largest display mode of the
+console that fits the window, or the smallest mode when none fits. The console
+itself changes mode, as there is no remote display; the registry mode comes
+back when the client that changed it disconnects.
+
 ## Client and file transfer
 
 Connect with any Remote Desktop client, such as mstsc or a FreeRDP 3 client
