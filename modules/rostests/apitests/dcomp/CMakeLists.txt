@@ -1,4 +1,5 @@
 add_executable(dcomp_apitest
+    composition_modechange.c
     composition_present.c
     visual.c
     testlist.c)

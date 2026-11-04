@@ -4787,7 +4787,7 @@ IntCompositionRedirectDC(_In_opt_ PWND Wnd, _In_ HDC hDC, _In_ ULONG DcxFlags, _
         }
     }
 
-    pdc = DC_LockDc(hDC);
+    pdc = bRedirect ? DC_LockDcAnyOwner(hDC) : DC_LockDc(hDC);
     if (pdc == NULL)
         return;
 
@@ -4920,7 +4920,7 @@ IntCompositionRedirectDC(_In_opt_ PWND Wnd, _In_ HDC hDC, _In_ ULONG DcxFlags, _
     if (IntIsLockUpdateSuppressed(Wnd, DcxFlags))
         REGION_SetRectRgn(prgn, 0, 0, 0, 0);
 
-    pdc = DC_LockDc(hDC);
+    pdc = DC_LockDcAnyOwner(hDC);
     if (pdc == NULL)
     {
         REGION_Delete(prgn);
