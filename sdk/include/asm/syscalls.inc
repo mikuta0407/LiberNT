@@ -341,15 +341,41 @@ Zw\Name:
     .set SyscallId, SyscallId + 1
     .endm
 
-    .macro STUB_WRAP Name, ArgCount
+    /* x64 code of an RV64X process calls this service through an x64 stub, as on ARM64X. */
+    .macro STUB_X64 Name
+    .pushsection .x64svc, "dr"
+    .p2align 5
+.Lx64svc\Name:
+    .byte 0x4c, 0x8b, 0xd1, 0xb8
+    .long SyscallId
+    .byte 0x0f, 0x05, 0xc3
+    .fill 21, 1, 0x90
+    .popsection
+    .pushsection .x64svm, "dr"
     .p2align 2
+    .rva Nt\Name, Zw\Name, .Lx64svc\Name
+    .popsection
+    .endm
+
+    .macro STUB_WRAP Name, ArgCount
+    .p2align 3
     .globl Nt\Name
-    .globl Zw\Name
 Nt\Name:
+    /* Emulation hosts patch this 24-byte slot; Zw stays the raw service. */
+    .option push
+    .option norvc
+    li t0, SyscallId
+    ecall
+    ret
+    nop
+    .option pop
+    .quad 0
+    .globl Zw\Name
 Zw\Name:
     li t0, SyscallId
     ecall
     ret
+    STUB_X64 \Name
     .set SyscallId, SyscallId + 1
     .endm
 
@@ -362,6 +388,7 @@ Zw\Name:
     li t0, SyscallId
     ecall
     ret
+    STUB_X64 \Name
     .set SyscallId, SyscallId + 1
     .endm
 

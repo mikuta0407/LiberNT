@@ -48,7 +48,7 @@
 830 stub @
 844 stub @
 845 stub @
-846 stub ILLoadFromStreamEx
+846 stdcall ILLoadFromStreamEx(ptr ptr)
 847 stub @
 849 stub @
 850 stub @
@@ -90,8 +90,8 @@
 2009 stub @
 
 @ stub ApplyProviderSettings
-@ stub AssocCreateForClasses
-@ stub AssocGetDetailsOfPropKey
+@ stdcall AssocCreateForClasses(ptr long ptr ptr)
+@ stdcall AssocGetDetailsOfPropKey(ptr ptr ptr ptr ptr)
 @ stub AssocShouldProcessUseAppToAppLaunching
 @ stub BrokerAppSiloShellItemsForApplicationUserModelId
 @ stub BrokerAppSiloShellItemsForPackageFamilyName
@@ -232,7 +232,7 @@
 @ stub RebaseOnVolumeID
 @ stub RegistryVerbs_GetHandlerMultiSelectModel
 @ cdecl SH32_InternalRestricted(long)
-@ stub SHAssocEnumHandlers
+@ stdcall SHAssocEnumHandlers(wstr long ptr) shell32.SHAssocEnumHandlers
 @ stdcall SHAssocEnumHandlersForProtocolByApplication(wstr ptr ptr)
 @ stdcall SHBindToFolderIDListParent(ptr ptr ptr ptr ptr)
 @ stdcall SHBindToFolderIDListParentEx(ptr ptr ptr ptr ptr ptr)
@@ -295,12 +295,13 @@
 @ stdcall SHGetPathFromIDListA(ptr ptr)
 @ stdcall SHGetPathFromIDListEx(ptr ptr long long)
 @ stdcall SHGetPathFromIDListW(ptr ptr)
+@ stdcall SHGetPropertyStoreFromIDList(ptr long ptr ptr)
 @ stdcall SHGetPropertyStoreFromParsingName(wstr ptr long ptr ptr)
 @ stdcall SHGetSpecialFolderLocation(long long ptr)
 @ stdcall SHGetSpecialFolderPathA(long ptr long long)
 @ stdcall SHGetSpecialFolderPathW(long ptr long long)
 @ stdcall SHGetStockIconInfo(long long ptr)
-@ stub SHGetTemporaryPropertyForItem
+@ stdcall SHGetTemporaryPropertyForItem(ptr ptr ptr)
 @ stdcall SHHandleUpdateImage(ptr)
 @ stdcall SHILCreateFromPathW(wstr ptr ptr)
 @ stub SHKnownFolderFromCSIDL
@@ -316,7 +317,7 @@
 @ stub SHSetFolderPathW
 @ stdcall SHSetKnownFolderPath(ptr long ptr wstr)
 @ stdcall SHSetLocalizedName(wstr wstr long)
-@ stub SHSetTemporaryPropertyForItem
+@ stdcall SHSetTemporaryPropertyForItem(ptr ptr ptr)
 @ stdcall SHSettingsChanged(ptr ptr)
 @ stdcall SHSimpleIDListFromPathAW(ptr)
 @ stdcall SHSimpleIDListFromPathW(wstr)

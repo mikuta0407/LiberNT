@@ -13,8 +13,11 @@ list(APPEND SOURCE
     ConsoleDbcsCells.c
     ConsoleProcessInheritance.c
     ConsoleVirtualTerminal.c
+    CreateAfterMissingName.c
+    CreateDirectoryRoot.c
     CreateProcess.c
     DefaultActCtx.c
+    DeleteFileCase.c
     DeviceIoControl.c
     dosdev.c
     EnumSystemCodePages.c
@@ -53,8 +56,10 @@ list(APPEND SOURCE
     LCMapString.c
     LoadLibraryExW.c
     LockFileEx.c
+    OpenFileByIdRename.c
     SandboxLaunch.c
     SystemImageCatalog.c
+    TebSegmentAfterWait.c
     SharedMemorySecurity.c
     SharedMemoryTransfer.c
     StdHandleInheritance.c
@@ -68,11 +73,13 @@ list(APPEND SOURCE
     PackageNames.c
     PixeloramaCompat.c
     ProcessPreferredUILanguages.c
+    PseudoConsoleCtrlC.c
     PssSnapshot.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
     QueryProcessCycleTime.c
     ReadFile.c
+    RenameDirectoryOldPath.c
     ResizePseudoConsole.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
@@ -88,6 +95,7 @@ list(APPEND SOURCE
     ProcessPowerThrottling.c
     TunnelCache.c
     UEFIFirmware.c
+    WaitFileHandle.c
     WaitForMultipleObjects.c
     WerRegisterFile.c
     WideCharToMultiByte.c

@@ -99,6 +99,7 @@ static BOOLEAN KdbpCmdTimer(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdInterrupt(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdInterrupts(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdPci(ULONG Argc, PCHAR Argv[]);
+static BOOLEAN KdbpCmdKdFiles(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdDeviceTree(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdDeviceNode(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdLocks(ULONG Argc, PCHAR Argv[]);
@@ -615,6 +616,8 @@ static const struct
     { "!interrupt", "!interrupt address", "Display a kernel interrupt object.", KdbpCmdInterrupt },
     { "!irqs", "!irqs [vector]", "List connected interrupt vectors or inspect one vector.", KdbpCmdInterrupts },
     { "!pci", "!pci bus:device.function", "Display live PCI BAR, interrupt and MSI/MSI-X configuration.", KdbpCmdPci },
+    { "!kdpull", "!kdpull file", "After cont, overwrite an NT path with the debugger's .kdfiles copy.", KdbpCmdKdFiles },
+    { "!kdreload", "!kdreload service", "After cont, restart a driver; its image is pulled from the debugger's .kdfiles map.", KdbpCmdKdFiles },
     { "!devtree", "!devtree", "List the PnP device tree and DEVICE_NODE addresses.", KdbpCmdDeviceTree },
     { "!devnode", "!devnode address", "Display a PnP device node and its assigned resources.", KdbpCmdDeviceNode },
     { "!locks", "!locks [-v|address]", "List held or waited-on executive resources (-v: all), or display one resource.", KdbpCmdLocks },
@@ -3903,7 +3906,8 @@ KdbpCmdBackTrace(ULONG Argc, PCHAR Argv[])
         Context = *KdbCurrentTrapFrame;
     }
 
-    KdbpPrintBackTraceContext(&Context, Verbose, FALSE);
+    /* A frozen processor's user stack belongs to another address space than the debugger's. */
+    KdbpPrintBackTraceContext(&Context, Verbose, KdbSelectedProcessor >= 0);
 
     return TRUE;
 }
@@ -6038,12 +6042,73 @@ static VOID KdbpPrintPciCapabilities(_In_ const PCI_COMMON_CONFIG *Config, _In_ 
         {
             USHORT Express = KdbpReadPciUshort(Raw, Offset + 2);
             KdbpPrint(" PCIe version=%u type=%u slot=%u", Express & 0xF, (Express >> 4) & 0xF, !!(Express & 0x100));
+            if ((ULONG)Offset + 0x14 <= BytesRead)
+            {
+                USHORT LinkStatus = KdbpReadPciUshort(Raw, Offset + 0x12);
+
+                KdbpPrint(" next=0x%02x\n      devctl 0x%04x devsta 0x%04x lnkcap 0x%08lx lnkctl 0x%04x lnksta 0x%04x (gen%u x%u)",
+                          Next, KdbpReadPciUshort(Raw, Offset + 8), KdbpReadPciUshort(Raw, Offset + 0xA),
+                          KdbpReadPciUlong(Raw, Offset + 0xC), KdbpReadPciUshort(Raw, Offset + 0x10), LinkStatus,
+                          LinkStatus & 0xF, (LinkStatus >> 4) & 0x3F);
+                KdbpPrint("\n");
+                Offset = Next;
+                continue;
+            }
         }
         KdbpPrint(" next=0x%02x\n", Next);
         Offset = Next;
     }
 }
+
+static VOID KdbpPrintPciAer(_In_ ULONG Bus, _In_ ULONG SlotNumber)
+{
+    ULONG NTAPI HalpKdReadPciConfig(ULONG BusNumber, ULONG SlotNumber, PVOID Buffer, ULONG Offset, ULONG Length);
+    ULONG Offset = sizeof(PCI_COMMON_CONFIG);
+    ULONG Header;
+    ULONG Count;
+
+    for (Count = 0; Count < 64 && Offset >= 0x100 && Offset < 0x1000; Count++)
+    {
+        if (HalpKdReadPciConfig(Bus, SlotNumber, &Header, Offset, sizeof(Header)) != sizeof(Header) ||
+            Header == 0 || Header == MAXULONG)
+        {
+            return;
+        }
+        if ((Header & 0xFFFF) == 0x0001)
+        {
+            ULONG Aer[6];
+
+            if (HalpKdReadPciConfig(Bus, SlotNumber, Aer, Offset, sizeof(Aer)) == sizeof(Aer))
+            {
+                KdbpPrint("  AER [0x%03lx] uncor-sts 0x%08lx mask 0x%08lx sev 0x%08lx cor-sts 0x%08lx mask 0x%08lx\n",
+                          Offset, Aer[1], Aer[2], Aer[3], Aer[4], Aer[5]);
+            }
+            return;
+        }
+        Offset = Header >> 20;
+    }
+}
 #endif
+
+static BOOLEAN KdbpCmdKdFiles(ULONG Argc, PCHAR Argv[])
+{
+    ULONG Kind = (strcmp(Argv[0], "!kdpull") == 0) ? KD_FILE_REQUEST_PULL : KD_FILE_REQUEST_RELOAD;
+    NTSTATUS Status;
+
+    if (Argc != 2)
+    {
+        KdbpPrint("Usage: %s %s\n", Argv[0], (Kind == KD_FILE_REQUEST_PULL) ? "file" : "service");
+        return TRUE;
+    }
+
+    Status = KdQueueFileRequest(Kind, Argv[1]);
+    if (NT_SUCCESS(Status))
+        KdbpPrint("%s %s queued; it runs after cont.\n", Argv[0], Argv[1]);
+    else
+        KdbpPrint("%s: request refused (0x%08lx)\n", Argv[0], Status);
+
+    return TRUE;
+}
 
 static BOOLEAN KdbpCmdPci(ULONG Argc, PCHAR Argv[])
 {
@@ -6129,6 +6194,7 @@ static BOOLEAN KdbpCmdPci(ULONG Argc, PCHAR Argv[])
     else if (HeaderType == PCI_BRIDGE_TYPE)
         KdbpPrint("  Interrupt line/pin %u/%u buses %u-%u-%u\n", Config.u.type1.InterruptLine, Config.u.type1.InterruptPin, Config.u.type1.PrimaryBus, Config.u.type1.SecondaryBus, Config.u.type1.SubordinateBus);
     KdbpPrintPciCapabilities(&Config, BytesRead);
+    KdbpPrintPciAer(Bus, Slot.u.AsULONG);
     return TRUE;
 #endif
 }
@@ -10003,6 +10069,32 @@ KdbpCmdAnalyze(
     return TRUE;
 }
 
+static VOID
+KdbpPrintFrozenProcessors(VOID)
+{
+    CHAR Command[16];
+    ULONG Processor;
+
+    KdbpDoCommand("cpu");
+    for (Processor = 0; Processor < (ULONG)(UCHAR)KeNumberProcessors; Processor++)
+    {
+        if (Processor == KeGetCurrentProcessorNumber() || KiProcessorBlock[Processor] == NULL)
+            continue;
+        RtlStringCbPrintfA(Command, sizeof(Command), "cpu %lu", Processor);
+        KdbpDoCommand(Command);
+        KdbpDoCommand("bt");
+    }
+    KdbpDoCommand("cpu current");
+}
+
+static VOID
+KdbpPersistSessionLog(VOID)
+{
+    /* Writing through the crash storage path resets the boot disk, so only a bugcheck session may do it. */
+    if (KiBugCheckData[0])
+        (VOID)KdpWriteBootLogAtCrash(NULL, NULL);
+}
+
 /*!\brief KDB Main Loop.
  *
  * \param EnteredOnSingleStep  TRUE if KDB was entered on single step.
@@ -10053,6 +10145,9 @@ KdbpCliMainLoop(
         // KdbPuts("\nEntered debugger\n");
         KdbPuts("\nType \"help\" for a list of commands.\n");
     }
+    if (!EnteredOnSingleStep && KiBugCheckData[0])
+        KdbpPrintFrozenProcessors();
+    KdbpPersistSessionLog();
 
     /* Main loop */
     while (Continue)
@@ -10085,6 +10180,7 @@ KdbpCliMainLoop(
 
         /* Invoke the command */
         Continue = KdbpDoCommand(Command);
+        KdbpPersistSessionLog();
     }
 }
 

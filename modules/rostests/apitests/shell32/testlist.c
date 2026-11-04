@@ -5,6 +5,13 @@
 extern void func_WindowPropertyStore(void);
 extern void func_AddCommas(void);
 extern void func_AssocCreateElement(void);
+extern void func_AssocCreateForClasses(void);
+extern void func_DefaultProperties(void);
+extern void func_ILLoadFromStreamEx(void);
+extern void func_ItemPropertyStores(void);
+extern void func_LocalizedName(void);
+extern void func_SHAssocEnumHandlers(void);
+extern void func_SHGetDriveMedia(void);
 extern void func_Control_RunDLLW(void);
 extern void func_CFSFolder(void);
 extern void func_CheckEscapes(void);
@@ -50,6 +57,7 @@ extern void func_She(void);
 extern void func_ShellExec_RunDLL(void);
 extern void func_ShellExecCmdLine(void);
 extern void func_ShellExecuteEx(void);
+extern void func_ShellExecuteLink(void);
 extern void func_ShellExecuteW(void);
 extern void func_ShellHook(void);
 extern void func_Shell_NotifyIconGetRect(void);
@@ -90,6 +98,13 @@ const struct test winetest_testlist[] =
     { "StartMenuPin", func_StartMenuPin },
     { "AddCommas", func_AddCommas },
     { "AssocCreateElement", func_AssocCreateElement },
+    { "AssocCreateForClasses", func_AssocCreateForClasses },
+    { "DefaultProperties", func_DefaultProperties },
+    { "ILLoadFromStreamEx", func_ILLoadFromStreamEx },
+    { "ItemPropertyStores", func_ItemPropertyStores },
+    { "LocalizedName", func_LocalizedName },
+    { "SHAssocEnumHandlers", func_SHAssocEnumHandlers },
+    { "SHGetDriveMedia", func_SHGetDriveMedia },
     { "Control_RunDLLW", func_Control_RunDLLW },
     { "CFSFolder", func_CFSFolder },
     { "CheckEscapes", func_CheckEscapes },
@@ -135,6 +150,7 @@ const struct test winetest_testlist[] =
     //{ "ShellExec_RunDLL", func_ShellExec_RunDLL }, Broke on Windows
     //{ "ShellExecCmdLine", func_ShellExecCmdLine }, Broke on Windows
     { "ShellExecuteEx", func_ShellExecuteEx }, // Mostly broken on Windows, only simple tests enabled
+    { "ShellExecuteLink", func_ShellExecuteLink },
     //{ "ShellExecuteW", func_ShellExecuteW }, Broke on Windows
     { "ShellHook", func_ShellHook },
     { "Shell_NotifyIconGetRect", func_Shell_NotifyIconGetRect },

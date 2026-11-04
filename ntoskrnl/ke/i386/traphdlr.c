@@ -1382,6 +1382,17 @@ KiTrap0EHandler(IN PKTRAP_FRAME TrapFrame)
         KiEoiHelper(TrapFrame);
     }
 
+    /* An unresolved fault above APC_LEVEL is fatal */
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        KeBugCheckWithTf(IRQL_NOT_LESS_OR_EQUAL,
+                         Cr2,
+                         KeGetCurrentIrql(),
+                         (TrapFrame->ErrCode >> 1) & 9,
+                         TrapFrame->Eip,
+                         TrapFrame);
+    }
+
     /* Check for syscall fault */
 #if 0
     if ((TrapFrame->Eip == (ULONG_PTR)CopyParams) ||
@@ -1759,7 +1770,7 @@ KiSystemServiceHandler(IN PKTRAP_FRAME TrapFrame,
     if (KiUserTrap(TrapFrame))
     {
         /* Check for active debugging */
-        if (KeGetCurrentThread()->Header.DebugActive & 0xFF)
+        if (KeGetCurrentThread()->Header.ActiveDR7)
         {
             /* Handle debug registers */
             KiHandleDebugRegistersOnTrapEntry(TrapFrame);

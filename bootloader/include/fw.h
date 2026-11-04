@@ -102,6 +102,17 @@ FwReadBlocks(
     _Out_ PVOID Buffer);
 
 BOOLEAN
+FwWriteBlocks(
+    _In_ PVOID Firmware,
+    _In_ ULONGLONG Block,
+    _In_ ULONG Count,
+    _In_ PVOID Buffer);
+
+BOOLEAN
+FwFlushBlocks(
+    _In_ PVOID Firmware);
+
+BOOLEAN
 FwBufferAligned(
     _In_ PVOID Firmware,
     _In_ PVOID Buffer);
@@ -114,6 +125,7 @@ PVOID
 FwDownloadFile(
     _In_ PCSTR Url,
     _In_opt_ PCSTR Address,
+    _In_ BOOLEAN Wait,
     _Out_ PULONG Size);
 
 struct _FREELDR_MEMORY_DESCRIPTOR*
@@ -137,6 +149,15 @@ FwPrepareRuntimeServices(
 VOID
 FwDebugPrint(
     _In_ PCSTR Text);
+
+VOID
+FwDebugAnnounce(
+    _In_ PCSTR Application,
+    _In_ BOOLEAN NewLog);
+
+BOOLEAN
+FwArchDebugPutChar(
+    _In_ UCHAR Character);
 
 extern VOID (*FwLateDebugPutChar)(UCHAR Character);
 

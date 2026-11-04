@@ -297,6 +297,7 @@ FdoQueryBusRelations(
 
     /* Acquire the global PCI lock to serialize bus enumeration */
     KeEnterCriticalRegion();
+    KeWaitForSingleObject(&((PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->LinkQuiescentLock, Executive, KernelMode, FALSE, NULL);
     KeWaitForSingleObject(&PciGlobalLock, Executive, KernelMode, FALSE, NULL);
 
     FdoEnumerateDevices(DeviceObject);
@@ -316,7 +317,12 @@ FdoQueryBusRelations(
            sizeof(Relations->Objects) * (DeviceExtension->DeviceListCount - 1);
     Relations = ExAllocatePoolWithTag(PagedPool, Size, TAG_PCI);
     if (!Relations)
+    {
+        KeSetEvent(&PciGlobalLock, IO_NO_INCREMENT, FALSE);
+        KeSetEvent(&DeviceExtension->LinkQuiescentLock, IO_NO_INCREMENT, FALSE);
+        KeLeaveCriticalRegion();
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     Relations->Count = DeviceExtension->DeviceListCount;
 
@@ -462,6 +468,7 @@ FdoQueryBusRelations(
 
     /* Release the global PCI lock */
     KeSetEvent(&PciGlobalLock, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&((PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->LinkQuiescentLock, IO_NO_INCREMENT, FALSE);
     KeLeaveCriticalRegion();
 
     if (ErrorOccurred)
@@ -880,7 +887,10 @@ FdoPnpControl(
 
         case IRP_MN_QUERY_DEVICE_RELATIONS:
             if (IrpSp->Parameters.QueryDeviceRelations.Type != BusRelations)
+            {
+                Status = Irp->IoStatus.Status;
                 break;
+            }
 
             Status = FdoQueryBusRelations(DeviceObject, Irp, IrpSp);
             IoReleaseRemoveLock(&DeviceExtension->RemoveLock, Irp);
@@ -960,6 +970,7 @@ FdoPnpControl(
             break;
 
         case IRP_MN_FILTER_RESOURCE_REQUIREMENTS:
+            Status = Irp->IoStatus.Status;
             break;
 
         case IRP_MN_REMOVE_DEVICE:
@@ -989,9 +1000,11 @@ FdoPnpControl(
         case IRP_MN_QUERY_CAPABILITIES:
         case IRP_MN_QUERY_PNP_DEVICE_STATE:
             /* Don't print the warning, too much noise */
+            Status = Irp->IoStatus.Status;
             break;
 
         default:
+            Status = Irp->IoStatus.Status;
             DPRINT1("Unknown PNP minor function 0x%x\n", IrpSp->MinorFunction);
             break;
     }

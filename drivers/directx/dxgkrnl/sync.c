@@ -418,18 +418,10 @@ DxgkpSyncCallDestroyPeriodicNotification(
     RtlZeroMemory(&DestroyArgs, sizeof(DestroyArgs));
     DestroyArgs.hNotification = NotificationHandle;
     DestroyArgs.hAdapter = Adapter->MiniportDeviceContext;
-    _SEH2_TRY
-    {
-        Status =
-            DXGK_CB_FULL(
-                Adapter,
-                DxgkDdiDestroyPeriodicFrameNotification)(&DestroyArgs);
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Status = _SEH2_GetExceptionCode();
-    }
-    _SEH2_END;
+    Status =
+        DXGK_CB_FULL(
+            Adapter,
+            DxgkDdiDestroyPeriodicFrameNotification)(&DestroyArgs);
     DxgkReleaseKmdCall(Adapter);
     return Status;
 }
@@ -522,18 +514,10 @@ DxgkpSyncCreatePeriodicNotification(
         DxgkpSyncCancelPeriodicReservation(SyncObj);
         return STATUS_DELETE_PENDING;
     }
-    _SEH2_TRY
-    {
-        Status =
-            DXGK_CB_FULL(
-                Adapter,
-                DxgkDdiCreatePeriodicFrameNotification)(&CreateArgs);
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Status = _SEH2_GetExceptionCode();
-    }
-    _SEH2_END;
+    Status =
+        DXGK_CB_FULL(
+            Adapter,
+            DxgkDdiCreatePeriodicFrameNotification)(&CreateArgs);
     DxgkReleaseKmdCall(Adapter);
     if (!NT_SUCCESS(Status))
     {
@@ -1683,7 +1667,7 @@ DxgkpCreateSynchronizationObjectInternal(
 #if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM3_0)
     if (Info->Flags.SignalByKmd)
     {
-        if (Info->Type != D3DDDI_CPU_NOTIFICATION || Info->Flags.Shared)
+        if (Info->Type != D3DDDI_CPU_NOTIFICATION || Info->Flags.Shared || Info->Flags.CrossAdapter)
             return STATUS_INVALID_PARAMETER;
 #if (REACTOS_WDDM_TARGET_LEVEL < 3000)
         return STATUS_NOT_SUPPORTED;

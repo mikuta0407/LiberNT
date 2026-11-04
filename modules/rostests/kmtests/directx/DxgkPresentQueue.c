@@ -282,6 +282,16 @@ DxgkPresentQueueTestDmaGeometry(VOID)
                  TRUE, 8192, 0, 0,
                  DXGK_PRESENT_DMA_MAX_ALLOCATIONS + 1, 2, 64, &Geometry);
     ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+    Status = DxgkPresentDmaCoreSelectGeometry(
+                 TRUE, 12288, 0, 4512, 0, 0, 64, &Geometry);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(Geometry.AllocationListSize, DXGK_PRESENT_DMA_MIN_ALLOCATIONS);
+    ok_eq_ulong(Geometry.DmaBufferPrivateDataSize, 4512);
+    ok_eq_ulong(Geometry.PatchLocationListSize, 64);
+    Status = DxgkPresentDmaCoreSelectGeometry(
+                 TRUE, 8192, 0, 0, 1, 2, 64, &Geometry);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(Geometry.AllocationListSize, DXGK_PRESENT_DMA_MIN_ALLOCATIONS);
     Status = DxgkPresentDmaCoreAllocationListBytes(
                  DXGK_PRESENT_DMA_MIN_ALLOCATIONS,
                  (SIZE_T)MAXULONG_PTR,
@@ -551,6 +561,14 @@ static VOID DxgkPresentQueueTestLimits(VOID)
     ok_eq_ulong(DxgkPresentLimitCoreGetReserved(&State), 0);
 }
 
+static VOID
+TestVBlankWaitResult(VOID)
+{
+    ok_eq_ulonglong(DXGK_VBLANK_WAIT_TIMEOUT_100NS, 800000ULL);
+    ok_eq_hex(DxgkPresentVBlankWaitResult(TRUE), STATUS_SUCCESS);
+    ok_eq_hex(DxgkPresentVBlankWaitResult(FALSE), STATUS_TIMEOUT);
+}
+
 START_TEST(DxgkPresentQueue)
 {
     PVOID DeviceA = (PVOID)(ULONG_PTR)0x1000;
@@ -563,6 +581,8 @@ START_TEST(DxgkPresentQueue)
     DXGK_PRESENT_QUEUE_TEST_QUEUE Queue;
     DXGK_PRESENT_QUEUE_TEST_ENTRY Entry;
     ULONG Index;
+
+    TestVBlankWaitResult();
 
 #if (REACTOS_WDDM_TARGET_LEVEL >= 1200)
     DxgkPresentQueueTestRefreshTargets();

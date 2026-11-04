@@ -26,12 +26,36 @@ typedef struct _EMU_HOST_THUNK
 int Felix86NtSetJump(PULONG64 Buffer) __attribute__((returns_twice));
 DECLSPEC_NORETURN void Felix86NtLongJump(PULONG64 Buffer, int Value);
 
+static
+VOID
+EmuGetTebStack(
+    _Out_ PEMU_TEB_STACK Stack)
+{
+    PTEB Teb = NtCurrentTeb();
+
+    Stack->Base = Teb->NtTib.StackBase;
+    Stack->Limit = Teb->NtTib.StackLimit;
+    Stack->Deallocation = Teb->DeallocationStack;
+}
+
+static
+VOID
+EmuSetTebStack(
+    _In_ const EMU_TEB_STACK *Stack)
+{
+    PTEB Teb = NtCurrentTeb();
+
+    Teb->NtTib.StackBase = Stack->Base;
+    Teb->NtTib.StackLimit = Stack->Limit;
+    Teb->DeallocationStack = Stack->Deallocation;
+}
+
 static RTL_CRITICAL_SECTION EmuHostLock;
 static PEMU_HOST_THUNK EmuHostThunks[EMU_THUNK_CHUNK_COUNT];
 static volatile LONG EmuHostThunkCount;
 static PUCHAR EmuStubBlock;
 static ULONG EmuStubUsed;
-static ULONG64 EmuGuestReturnStub;
+ULONG64 EmuGuestReturnStub;
 #define EMU_RV64X_SECTION ".rv64x"
 
 typedef struct _EMU_RV64X_IMAGE
@@ -59,7 +83,8 @@ static const EMU_REGISTER EmuCallArguments[4] = { EmuRcx, EmuRdx, EmuR8, EmuR9 }
 static
 BOOLEAN
 EmuIsValidSignature(
-    _In_ PCSTR Signature)
+    _In_ PCSTR Signature,
+    _In_ BOOLEAN Entry)
 {
     SIZE_T Length = strlen(Signature);
     SIZE_T Index;
@@ -71,6 +96,10 @@ EmuIsValidSignature(
         {
             case EMU_HOST_TYPE_VOID:
                 if (Index) return FALSE;
+                break;
+
+            case EMU_HOST_TYPE_PAIR:
+                if (!Index || !Entry) return FALSE;
                 break;
 
             case EMU_HOST_TYPE_INT64:
@@ -123,19 +152,21 @@ EmuDescriptorSignature(
     _In_ BOOLEAN Entry,
     _Out_writes_(EMU_HOST_MAX_ARGUMENTS + 2) PCHAR Signature)
 {
-    static const CHAR Types[] = "vqwhHbBfd";
+    static const CHAR Types[] = "vqwhHbBfdP";
     ULONG Count = Descriptor[2], Index, Kind;
 
     if ((Descriptor[0] | (Descriptor[1] << 8)) != EMU_HOST_DESCRIPTOR_MAGIC) return FALSE;
     if ((Descriptor[3] & EMU_HOST_DESCRIPTOR_UNSUPPORTED) || Count > EMU_HOST_MAX_ARGUMENTS) return FALSE;
 
     Kind = Descriptor[3] & 0xF;
-    if (Kind >= sizeof(Types) - 1) return FALSE;
+    if (Kind >= sizeof(Types) - 1 || Types[Kind] == EMU_HOST_TYPE_PAIR) return FALSE;
     Signature[0] = Types[Kind];
     for (Index = 0; Index < Count; Index++)
     {
         Kind = (Descriptor[4 + Index / 2] >> ((Index & 1) * 4)) & 0xF;
         if (!Kind || Kind >= sizeof(Types) - 1) return FALSE;
+        /* TODO: native calls into x64 pass no data for 16-byte aggregates: the RV64X exit thunk stores 0 in their slot */
+        if (Types[Kind] == EMU_HOST_TYPE_PAIR && !Entry) return FALSE;
         Signature[Index + 1] = Types[Kind];
     }
     if (Entry && (Descriptor[3] & EMU_HOST_DESCRIPTOR_VARIADIC))
@@ -251,6 +282,7 @@ EmuAllocateStub(
         {
             return 0;
         }
+        EmuCoreExcludeCode(Base, Size);
         EmuStubBlock = Base;
         EmuStubUsed = 0;
     }
@@ -260,6 +292,19 @@ EmuAllocateStub(
     RtlCopyMemory(Stub, Code, Length);
     EmuStubUsed += EMU_STUB_SIZE;
     return (ULONG64)Stub;
+}
+
+ULONG64
+EmuCreateStub(
+    _In_reads_(Length) const UCHAR *Code,
+    _In_ ULONG Length)
+{
+    ULONG64 Stub;
+
+    RtlEnterCriticalSection(&EmuHostLock);
+    Stub = EmuAllocateStub(Code, Length);
+    RtlLeaveCriticalSection(&EmuHostLock);
+    return Stub;
 }
 
 static
@@ -291,7 +336,7 @@ EmuGuestThunk(
         }
         _SEH2_END;
     }
-    if (!Native || !Signature || !EmuIsValidSignature(Signature)) return 0;
+    if (!Native || !Signature || !EmuIsValidSignature(Signature, TRUE)) return 0;
 
     RtlEnterCriticalSection(&EmuHostLock);
     Count = (ULONG)EmuHostThunkCount;
@@ -378,29 +423,54 @@ EmuHostCall(
     _Inout_ PEMU_REGISTERS Registers)
 {
     ULONG64 Arguments[EMU_HOST_MAX_ARGUMENTS] = { 0 };
-    ULONG Count = Thunk->Count;
+    ULONG64 Slots[EMU_HOST_MAX_ARGUMENTS * 2] = { 0 };
+    ULONG Count = Thunk->Count, Index, Used = 0;
     ULONG64 Result;
     PULONG64 Vectors;
-    ULONG_PTR Base, Rsp;
+    ULONG_PTR Base, Limit, Rsp;
     ULONG Stride;
     NTSTATUS Status;
 
     if (Thunk->Named < Count)
     {
-        Base = (ULONG_PTR)Thread->GuestTeb->NtTib.StackBase;
+        Base = (ULONG_PTR)(EmuProcess.Attached ? Thread->GuestStack.Base : Thread->GuestTeb->NtTib.StackBase);
+        Limit = (ULONG_PTR)(EmuProcess.Attached ? Thread->GuestStack.Limit : Thread->GuestTeb->DeallocationStack);
         Rsp = (ULONG_PTR)Registers->Gpr[EmuRsp];
-        if (Rsp < Base && Rsp >= (ULONG_PTR)Thread->GuestTeb->DeallocationStack)
+        if (Rsp < Base && Rsp >= Limit)
             Count = max(Thunk->Named, (ULONG)min((ULONG_PTR)Count, max((Base - Rsp) / sizeof(ULONG64), 1) - 1));
     }
 
     Status = EmuCollectArguments(Thread, Thunk->Signature + 1, Count, Registers, Arguments);
+    if (NT_SUCCESS(Status))
+    {
+        _SEH2_TRY
+        {
+            for (Index = 0; Index < Count; Index++)
+            {
+                if (Thunk->Signature[Index + 1] == EMU_HOST_TYPE_PAIR)
+                {
+                    Slots[Used++] = ((PULONG64)(ULONG_PTR)Arguments[Index])[0];
+                    Slots[Used++] = ((PULONG64)(ULONG_PTR)Arguments[Index])[1];
+                }
+                else
+                {
+                    Slots[Used++] = Arguments[Index];
+                }
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
     if (!NT_SUCCESS(Status))
     {
         Registers->Gpr[EmuRax] = (ULONG)Status;
         return;
     }
 
-    Result = EmuInvokeNative(Thunk->Native, Arguments, Arguments + 8, Count > 8 ? Count - 8 : 0);
+    Result = EmuInvokeNative(Thunk->Native, Slots, Slots + 8, Used > 8 ? Used - 8 : 0);
     switch (Thunk->Signature[0])
     {
         case EMU_HOST_TYPE_VOID:
@@ -441,7 +511,6 @@ EmuGuestReturn(
     Felix86NtLongJump(Call->Jump, 1);
 }
 
-static
 ULONG64
 NTAPI
 EmuCallGuest(
@@ -454,13 +523,18 @@ EmuCallGuest(
     EMU_GUEST_CALL Call;
     PULONG64 Stack, Vectors;
     ULONG Count, Index, Stride;
-    ULONG64 Value;
+    ULONG64 Value, EmulatorSp = 0;
 
-    if (!EmuIsValidSignature(Signature)) EmuFatal(STATUS_INVALID_PARAMETER, "invalid guest call signature");
+    if (!EmuIsValidSignature(Signature, FALSE)) EmuFatal(STATUS_INVALID_PARAMETER, "invalid guest call signature");
     if (!Thread || !Thread->Cpu || !Thread->HostDepth || !Function) return 0;
 
     if (Felix86NtSetJump(Call.Jump))
     {
+        if (EmuProcess.Attached)
+        {
+            EmuGetTebStack(&Thread->GuestTebStack);
+            EmuSetTebStack(&Call.NativeStack);
+        }
         if (EmuIsFloatType(Signature[0])) return EmuHostNarrow(Signature[0], Call.FloatResult);
         if (Signature[0] == EMU_HOST_TYPE_VOID) return 0;
         return EmuHostNarrow(Signature[0], Call.Result);
@@ -472,6 +546,18 @@ EmuCallGuest(
     Call.Rip = Registers->Rip;
     Call.Frame = EmuCoreGetFrame(Thread->Cpu);
     Call.HostDepth = Thread->HostDepth;
+    Call.Boundary = Thread->Boundary;
+    if (Call.Boundary)
+    {
+        Call.Entry.ContextFlags = CONTEXT_AMD64_FULL;
+        EmuCoreGetContext(Thread->Cpu, &Call.Entry);
+    }
+    if (EmuProcess.Attached)
+    {
+        EmulatorSp = Thread->Boundary ? Thread->Boundary->EmulatorSp : (ULONG64)(ULONG_PTR)Thread->EmulatorStack.Base;
+        EmuGetTebStack(&Call.NativeStack);
+        EmuSetTebStack(&Thread->GuestTebStack);
+    }
 
     Count = (ULONG)strlen(Signature) - 1;
     Stack = (PULONG64)(((Call.Rsp - EMU_GUEST_STACK_GAP - max(Count, 4) * sizeof(ULONG64)) & ~(ULONG64)15) -
@@ -497,7 +583,7 @@ EmuCallGuest(
     Call.Previous = Thread->GuestCall;
     Thread->GuestCall = &Call;
     Thread->HostDepth = 0;
-    EmuCoreRun(Thread->Cpu);
+    EmuRunGuest(Thread->Cpu, &Call.RunFrame, EmulatorSp);
 }
 
 static
@@ -595,6 +681,32 @@ EmuHostLoad(
     return Initialize();
 }
 
+static
+VOID
+EmuHostDispatch(
+    _In_ PEMU_THREAD Thread,
+    _In_ ULONG Service,
+    _Inout_ PEMU_REGISTERS Registers)
+{
+    ULONG Index = Service - EMU_HOST_SERVICE_THUNK;
+
+    if (Service == EMU_HOST_SERVICE_LOAD)
+        Registers->Gpr[EmuRax] = EmuHostLoad((PCWSTR)Registers->Gpr[EmuR10]);
+    else if (Service >= EMU_HOST_SERVICE_THUNK && Index < (ULONG)EmuHostThunkCount)
+        EmuHostCall(Thread, &EmuHostThunks[Index / EMU_THUNK_CHUNK_SIZE][Index % EMU_THUNK_CHUNK_SIZE], Registers);
+    else if (Service == EMU_DISPATCH_SERVICE)
+        EmuX64DispatchService(Thread, Registers);
+    else if (!EmuBridgeService(Thread, Service, Registers))
+        Registers->Gpr[EmuRax] = (ULONG)STATUS_INVALID_SYSTEM_SERVICE;
+}
+
+VOID
+EmuBoundaryRoutine(
+    _In_ PEMU_BOUNDARY Boundary)
+{
+    EmuHostDispatch(Boundary->Thread, Boundary->Service, Boundary->Registers);
+}
+
 VOID
 EmuHostService(
     _In_ PEMU_THREAD Thread,
@@ -603,18 +715,35 @@ EmuHostService(
 {
     ULONG64 ServiceRip = Registers->Rip;
     ULONG64 ReturnRip = Registers->Gpr[EmuRcx];
-    ULONG Index = Service - EMU_HOST_SERVICE_THUNK;
+    EMU_BOUNDARY Boundary;
 
     if (Service == EMU_HOST_SERVICE_RETURN) EmuGuestReturn(Thread, Registers);
 
     Registers->Rip = ReturnRip;
     Thread->HostDepth++;
-    if (Service == EMU_HOST_SERVICE_LOAD)
-        Registers->Gpr[EmuRax] = EmuHostLoad((PCWSTR)Registers->Gpr[EmuR10]);
-    else if (Service >= EMU_HOST_SERVICE_THUNK && Index < (ULONG)EmuHostThunkCount)
-        EmuHostCall(Thread, &EmuHostThunks[Index / EMU_THUNK_CHUNK_SIZE][Index % EMU_THUNK_CHUNK_SIZE], Registers);
+    if (EmuProcess.Attached && Thread->GuestCall)
+    {
+        Boundary.Previous = Thread->Boundary;
+        Boundary.Thread = Thread;
+        Boundary.RunFrame = Thread->GuestCall->RunFrame;
+        Boundary.GuestCall = Thread->GuestCall;
+        Boundary.Service = Service;
+        Boundary.Registers = Registers;
+        Boundary.Context = NULL;
+        Boundary.Unwind = NULL;
+        EmuGetTebStack(&Thread->GuestTebStack);
+        EmuSetTebStack(&Boundary.GuestCall->NativeStack);
+        Thread->Boundary = &Boundary;
+        EmuEnterBoundary(&Boundary);
+        Thread->Boundary = Boundary.Previous;
+        EmuGetTebStack(&Boundary.GuestCall->NativeStack);
+        EmuSetTebStack(&Thread->GuestTebStack);
+        if (Boundary.Unwind) RtlFreeHeap(RtlGetProcessHeap(), 0, Boundary.Unwind);
+    }
     else
-        Registers->Gpr[EmuRax] = (ULONG)STATUS_INVALID_SYSTEM_SERVICE;
+    {
+        EmuHostDispatch(Thread, Service, Registers);
+    }
     Thread->HostDepth--;
     if (Registers->Rip == ReturnRip) Registers->Rip = ServiceRip;
 }
@@ -648,6 +777,31 @@ EmuCallDescribed(
     return EmuCallGuest(Function, Signature, Arguments);
 }
 
+static
+ULONG64
+EmuImportThunkTarget(
+    _In_ ULONG64 Rip)
+{
+    PULONG Code;
+    ULONG Depth;
+
+    _SEH2_TRY
+    {
+        for (Depth = 0; Depth < EMU_FORWARDER_DEPTH; Depth++)
+        {
+            Code = (PULONG)(ULONG_PTR)Rip;
+            if ((Code[0] & 0x00000FFF) != 0x00000297 || (Code[1] & 0x000FFFFF) != 0x0002B283 || Code[2] != 0x00028067)
+                break;
+            Rip = *(PULONG64)(ULONG_PTR)(Rip + (LONG)(Code[0] & 0xFFFFF000) + ((LONG)Code[1] >> 20));
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+    return Rip;
+}
+
 ULONG64
 EmuNativeEntry(
     _In_ ULONG64 Rip)
@@ -656,6 +810,9 @@ EmuNativeEntry(
 
     if (!EmuCodeMap || Rip > EmuCodeMapLimit) return 0;
     if (!(EmuCodeMap[Rip >> (PAGE_SHIFT + 3)] & (1 << ((Rip >> PAGE_SHIFT) & 7)))) return 0;
+    Rip = EmuImportThunkTarget(Rip);
+    Stub = EmuBridgeEntry(Rip);
+    if (Stub) return Stub;
     Stub = EmuGuestThunk((PVOID)(ULONG_PTR)Rip, NULL);
     if (!Stub)
     {

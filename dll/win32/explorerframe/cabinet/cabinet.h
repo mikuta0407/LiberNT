@@ -115,6 +115,7 @@ private:
     void ActivateTab(int index);
     void PlaceBrowsers();
     void Navigate(PCIDLIST_ABSOLUTE pidl);
+    HRESULT BrowseTab(CabinetTab *tab, PCIDLIST_ABSOLUTE pidl);
     void NavigateHistory(int delta);
     void NavigateUp();
     void Refresh();
@@ -137,6 +138,7 @@ private:
     void LoadText(UINT id, LPWSTR buffer, int length);
     void CreateBands();
     void CreateNavigationPane();
+    void SetNavigationBackground(COLORREF color);
     void SyncNavigationPane();
     void WatchFolder();
     void UpdateDetails();
@@ -203,6 +205,7 @@ private:
     UINT m_PinnedCount;
     HICON m_PinIcon;
     HWND m_FocusSave;
+    RECT m_PanelRect;
     RECT m_ViewRect;
     RECT m_PaneRect;
     BOOL m_DetailsPane;
@@ -214,6 +217,8 @@ private:
     HBITMAP m_DetailsBitmap;
     BOOL m_InHistoryNavigation;
     BOOL m_FocusViewOnNavigate;
+    ULONG m_NavigationDepth;
+    BOOL m_ClosePending;
     ULONG m_ChangeNotify;
     BOOL m_NavigationVisible;
     IExplorerBrowser *m_SearchBrowser;

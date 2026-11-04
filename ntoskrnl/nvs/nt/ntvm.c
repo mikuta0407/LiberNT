@@ -299,7 +299,7 @@ MiAllocateVirtualMemoryNt(
     PAGED_CODE();
 
     if (!MiHighestAddressFromZeroBits(ZeroBits, &Highest))
-        return STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_PARAMETER_3;
 
     if (HighestEndingAddress != 0 && HighestEndingAddress < Highest)
         Highest = HighestEndingAddress;
@@ -1371,11 +1371,15 @@ MiCopyAddressSpace(
         if (NT_SUCCESS(Status))
         {
             PVOID Mapping = (PVOID)(ULONG_PTR)(Mdl->MappedSystemVa + Mdl->ByteOffset);
+            KIRQL OldIrql;
 
+            KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
             if (WriteAccess)
                 RtlCopyMemory(Mapping, Buffer, Size);
             else
                 RtlCopyMemory(Buffer, Mapping, Size);
+            MiUnmapLockedPagesLocal(Mdl);
+            KeLowerIrql(OldIrql);
         }
     }
     _SEH2_FINALLY

@@ -113,6 +113,7 @@ list(APPEND KMTEST_DRV_SOURCE
     directx/Dxgmms2VidMm.c
     example/Example.c
     example/KernelType.c
+    hal/HalBusData.c
     hal/HalSystemInfo.c
     ndis/NdisIfProvider.c
     ndis/NdisRwLock.c
@@ -181,6 +182,12 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoStackKM.c
     ntos_io/IoActivityId.c
     ntos_io/IoAcpiIoctl.c
+    ntos_io/IoPciPdoPnp.c
+    ntos_io/IoAcpiCmosRegion.c
+    ntos_io/IoErrorLogEntry.c
+    ntos_io/IoPciD3Cold.c
+    ntos_io/IoPciExpressInterfaces.c
+    ntos_io/IoPciRom.c
     ntos_io/IoStackLimits.c
     ntos_io/IoMdl.c
     ntos_io/IoModern.c
@@ -212,6 +219,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KePcr.c
     ntos_ke/KeQueue.c
     ntos_ke/KeProcessStackCount.c
+    ntos_ke/KeQueryBasePriority.c
     ntos_ke/KeProcessor.c
     ntos_ke/KeSemaphore.c
     ntos_ke/KeSpinLock.c
@@ -221,6 +229,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeTimer2KM.c
     ntos_ke/KeWaitMultiple.c
     ntos_mm/MmAllocateContiguousNode.c
+    ntos_mm/MmDriverMemory.c
     ntos_mm/MmMdl.c
     ntos_mm/MmMdlDispatch.c
     ntos_mm/MmLargePages.c
@@ -292,6 +301,7 @@ list(APPEND KMTEST_DRV_SOURCE
     win32ss/CddDisplay.c
     ${COMMON_SOURCE}
 
+    ${REACTOS_SOURCE_DIR}/drivers/bus/acpi/cmos_core.c
     ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/gpuva_core.c
     ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/adapter_map_core.c
     ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/adapter_start_core.c
@@ -398,6 +408,7 @@ endif()
 
 add_library(kmtest_drv MODULE ${KMTEST_DRV_SOURCE})
 target_include_directories(kmtest_drv PRIVATE
+    ${REACTOS_SOURCE_DIR}/drivers/bus/acpi
     ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl
     ${REACTOS_SOURCE_DIR}/drivers/directx/dxgmms2
     ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/softgpu

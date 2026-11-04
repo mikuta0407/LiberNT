@@ -27,16 +27,19 @@ extern void func_wcstombs(void);
 
 extern void func_DebugRegisters(void);
 extern void func_DllLoadNotification(void);
+extern void func_FileStatInformation(void);
 extern void func_arm64_chpe(void);
 extern void func_wow64_startup(void);
 extern void func_wow64_native_process(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
+extern void func_LdrForwarderPath(void);
 extern void func_LdrGetDllHandleByName(void);
 extern void func_LdrLoadDll(void);
 extern void func_LdrQueryProcessModuleInformation(void);
 extern void func_load_notifications(void);
 extern void func_memmove(void);
+extern void func_memset(void);
 extern void func_MemoryAccounting(void);
 extern void func_NtAcceptConnectPort(void);
 extern void func_NtAccessCheck(void);
@@ -51,14 +54,20 @@ extern void func_NtCompareTokens(void);
 extern void func_NtContinue(void);
 #endif
 #ifdef _M_AMD64
+extern void func_NullGsSelector(void);
+extern void func_RtlRestoreContextConsolidate(void);
 extern void func_SyscallStub(void);
 extern void func_x87Exception(void);
+#endif
+#ifdef _M_RISCV64
+extern void func_InstructionCacheMigration(void);
 #endif
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
 extern void func_NtCreateKeyCached(void);
 extern void func_NtCreateProfile(void);
 extern void func_NtCreateSection(void);
+extern void func_NtCreateSection_ConcurrentImage(void);
 extern void func_NtCreateThread(void);
 extern void func_NtCreateThreadWin32(void);
 extern void func_NtDeleteKey(void);
@@ -145,6 +154,8 @@ extern void func_RtlLocale(void);
 extern void func_RtlMemoryStream(void);
 extern void func_RtlMultipleAllocateHeap(void);
 extern void func_RtlNtPathNameToDosPathName(void);
+extern void func_RtlPortableOperatingSystem(void);
+extern void func_PortableWorkspaceHibernate(void);
 extern void func_RtlpApplyLengthFunction(void);
 extern void func_RtlpEnsureBufferSize(void);
 extern void func_RtlQueryEnvironmentVariable(void);
@@ -170,6 +181,7 @@ extern void func_StackOverflow(void);
 extern void func_ScanfSecure(void);
 extern void func_StackProbe(void);
 extern void func_TimerResolution(void);
+extern void func_SehHandlerLocals(void);
 #if defined(_M_IX86) || defined(_M_AMD64)
 extern void func_UserModeException(void);
 #endif
@@ -206,14 +218,17 @@ const struct test winetest_testlist[] =
 
     { "DebugRegisters",                 func_DebugRegisters },
     { "DllLoadNotification",            func_DllLoadNotification },
+    { "FileStatInformation",            func_FileStatInformation },
     { "arm64_chpe",                     func_arm64_chpe },
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
+    { "LdrForwarderPath",               func_LdrForwarderPath },
     { "LdrGetDllHandleByName",          func_LdrGetDllHandleByName },
     { "LdrLoadDll",                     func_LdrLoadDll },
     { "LdrQueryProcessModuleInformation", func_LdrQueryProcessModuleInformation },
     { "load_notifications",             func_load_notifications },
     { "memmove",                        func_memmove },
+    { "memset",                         func_memset },
     { "MemoryAccounting",               func_MemoryAccounting },
     { "NtAcceptConnectPort",            func_NtAcceptConnectPort },
     { "NtAccessCheck",                  func_NtAccessCheck },
@@ -228,14 +243,20 @@ const struct test winetest_testlist[] =
     { "NtContinue",                     func_NtContinue },
 #endif
 #ifdef _M_AMD64
+    { "NullGsSelector",                 func_NullGsSelector },
+    { "RtlRestoreContextConsolidate",   func_RtlRestoreContextConsolidate },
     { "SyscallStub",                    func_SyscallStub },
     { "x87Exception",                   func_x87Exception },
+#endif
+#ifdef _M_RISCV64
+    { "InstructionCacheMigration",      func_InstructionCacheMigration },
 #endif
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },
     { "NtCreateKeyCached",              func_NtCreateKeyCached },
     { "NtCreateProfile",                func_NtCreateProfile },
     { "NtCreateSection",                func_NtCreateSection },
+    { "NtCreateSection_ConcurrentImage", func_NtCreateSection_ConcurrentImage },
     { "NtCreateThread",                 func_NtCreateThread },
     { "NtCreateThreadWin32",            func_NtCreateThreadWin32 },
     { "NtDeleteKey",                    func_NtDeleteKey },
@@ -323,6 +344,8 @@ const struct test winetest_testlist[] =
     { "RtlMemoryStream",                func_RtlMemoryStream },
     { "RtlMultipleAllocateHeap",        func_RtlMultipleAllocateHeap },
     { "RtlNtPathNameToDosPathName",     func_RtlNtPathNameToDosPathName },
+    { "RtlPortableOperatingSystem",     func_RtlPortableOperatingSystem },
+    { "PortableWorkspaceHibernate",     func_PortableWorkspaceHibernate },
     { "RtlpApplyLengthFunction",        func_RtlpApplyLengthFunction },
     { "RtlpEnsureBufferSize",           func_RtlpEnsureBufferSize },
     { "RtlQueryEnvironmentVariable",    func_RtlQueryEnvironmentVariable },
@@ -345,6 +368,7 @@ const struct test winetest_testlist[] =
     { "ScanfSecure",                    func_ScanfSecure },
     { "StackProbe",                     func_StackProbe },
     { "TimerResolution",                func_TimerResolution },
+    { "SehHandlerLocals",               func_SehHandlerLocals },
 #if defined(_M_IX86) || defined(_M_AMD64)
     { "UserModeException",              func_UserModeException },
 #endif

@@ -821,6 +821,32 @@ struct _DXGKRNL_ADAPTER
      * is also used by the D3DKMT adapter-open and enumeration paths.
      */
     GUID                        AdapterGuid;
+    WCHAR                       VideoId[40];
+    DXGK_WDDMVERSION            DriverWddmVersion;
+    ULONG                       BlockListFlags;
+    BOOLEAN                     BlockListInitialized;
+    BOOLEAN                     KernelBlockListTooLarge;
+    BOOLEAN                     RuntimeBlockListTooLarge;
+    PWCHAR                      KernelBlockList;
+    ULONG                       KernelBlockListBytes;
+    PWCHAR                      RuntimeBlockList;
+    ULONG                       RuntimeBlockListBytes;
+    LONG                        ExcludeAccessActive;
+    LONG                        BridgeAccessExcluded;
+    BOOLEAN                     LinkQuiescentInterfaceValid;
+    PCI_EXPRESS_LINK_QUIESCENT_INTERFACE LinkQuiescentInterface;
+    BOOLEAN                     RootPortInterfaceValid;
+    PCI_EXPRESS_ROOT_PORT_INTERFACE RootPortInterface;
+    PVOID                       FrameBufferSaveSection;
+    ULONGLONG                   FrameBufferSaveSize;
+    PVOID                       FrameBufferSaveView;
+    PMDL                        FrameBufferSaveMdl;
+    DXGK_ADL                   *FrameBufferSaveAdl;
+    DXGKDDI_FEATURE_INTERFACE   KmdFeatureInterface;
+    BOOLEAN                     KmdFeatureInterfaceValid;
+    FAST_MUTEX                  KmdFeatureCacheLock;
+    ULONGLONG                   KmdFeatureCached;
+    DXGKARG_QUERYFEATURESUPPORT KmdFeatureCache[DXGK_DRIVER_FEATURE_MAX];
     LUID                        AdapterLuid;
 
     /*
@@ -911,6 +937,7 @@ struct _DXGKRNL_ADAPTER
     BOOLEAN                     HybridIntegrated;
     BOOLEAN                     SupportMultiPlaneOverlay;
     UINT                        MaxOverlayPlanes;
+    BOOLEAN                     IndependentVidPnVSyncControl;
     BOOLEAN                     SurpriseRemovalHandled;
 
     /*
@@ -996,6 +1023,10 @@ struct _DXGKRNL_ADAPTER
      * unexplained: ACPI evaluations, service queries, POST ownership. */
     volatile LONG               AcpiEvalCount;
     volatile LONG               QueryServicesCount;
+    BOOLEAN                     MpoStretchSupported[16];
+    BOOL                        MpoHudSupported;
+    LIST_ENTRY                  SpbResourceList;
+    FAST_MUTEX                  SpbResourceLock;
     volatile LONG               PostDisplayAcquireCount;
     /* KMTQAITYPE_UMOPENGLINFO answer cached after the first successful
      * registry query; the adapter's ICD registration does not change while
@@ -1293,6 +1324,7 @@ struct _DXGKRNL_ADAPTER
      */
     volatile LONG               VsyncPending;
     volatile LONG               ScanoutModeChangePending;
+    volatile LONG               DeferredVisibleSourceMask;
     ULONG                       ScanoutModeChangeWidth[32];
     ULONG                       ScanoutModeChangeHeight[32];
     /* The ISR records the effective scan address independently of the
@@ -1402,6 +1434,9 @@ struct _DXGKRNL_ADAPTER
     D3DKMT_HANDLE               CddPrimaryBindingHandle;
     ULONG64                     CddBindingGeneration;
     struct _DXGKRNL_CDD_CAPTURE *CddCapture;
+    BOOLEAN                     GdiHardwareAcceleration;
+    KMUTEX                      GdiBltTextureMutex;
+    LIST_ENTRY                  GdiBltTextureList;
     /* Set by an adapter reset and by a miniport Present that rejects the
      * persistent CDD bindings: the KMD's device-specific opens are gone and
      * the next Present must recreate them. */
@@ -1448,6 +1483,8 @@ struct _DXGKRNL_ADAPTER
     KSPIN_LOCK                  PagingBufferPoolLock;
     LIST_ENTRY                  PagingBufferPoolList;
     KEVENT                      PagingBufferPoolEvent;
+    /* Set by the completion DPC after it retires a node fence; waiters clear it before checking. */
+    KEVENT                      FenceProgressEvent;
 
     /*
      * GUID_DISPLAY_DEVICE_ARRIVAL device interface.
@@ -1491,10 +1528,16 @@ C_ASSERT((DXGK_SUBMITTED_FENCE_IDENTITY_CAPACITY & (DXGK_SUBMITTED_FENCE_IDENTIT
  * Multiple devices can exist simultaneously per adapter.
  * Allocated from NonPagedPool with TAG_DXGK_DEVICE.
  * ====================================================================== */
+#define DXGKP_PRESENT_STATS_SOURCES 16
+
 struct _DXGKRNL_DEVICE
 {
     /* Back-pointer to the owning adapter. */
     PDXGKRNL_ADAPTER            Adapter;
+
+    volatile LONG               PresentStatsCount[DXGKP_PRESENT_STATS_SOURCES];
+    volatile LONG64             PresentStatsRefresh[DXGKP_PRESENT_STATS_SOURCES];
+    volatile LONG64             PresentStatsQpc[DXGKP_PRESENT_STATS_SOURCES];
 
     /* Owner-scoped typed generation handle returned to user mode. */
     D3DKMT_HANDLE               Handle;
@@ -1596,6 +1639,12 @@ struct _DXGKRNL_DEVICE
     LIST_ENTRY                  OverlayListHead;
 
     FAST_MUTEX                  DeviceMutex;
+
+    /* Open of the window surface this device last Blt-presented to by window; protected by WindowBltMutex. */
+    KMUTEX                      WindowBltMutex;
+    ULONG                       WindowBltShare;
+    D3DKMT_HANDLE               WindowBltResource;
+    D3DKMT_HANDLE               WindowBltAllocation;
 };
 
 /* A published overlay owns its device and displayed-allocation references. */
@@ -1606,6 +1655,7 @@ struct _DXGKRNL_OVERLAY
     D3DKMT_HANDLE               Handle;
     HANDLE                      hMiniportOverlay;
     PDXGKVMM_ALLOCATION         Allocation;
+    D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
     KMUTEX                      OperationMutex;
     volatile LONG               ReferenceCount;
     volatile LONG               Destroying;
@@ -1896,6 +1946,13 @@ typedef struct _DXGKRNL_GPUVA_PIN
 #define DXGKP_GPU_PAGES_PER_64K     (DXGKP_GPU_PAGE_64K / PAGE_SIZE)
 #define DXGKP_GPU_PAGES_PER_LEAF    512
 
+typedef struct _DXGKVMM_HOST_APERTURE_RUN
+{
+    ULONG                       FirstPage;
+    ULONG                       PageCount;
+    PVOID                       Va;
+} DXGKVMM_HOST_APERTURE_RUN, *PDXGKVMM_HOST_APERTURE_RUN;
+
 typedef struct _DXGKRNL_GPUVA_PAGE_TABLE
 {
     LIST_ENTRY                  PageTableListEntry;
@@ -1922,6 +1979,7 @@ typedef struct _DXGKRNL_GPUVA_PAGE_TABLE
     HANDLE                      MiniportDeviceHandle;
 
     PVOID                       ShadowVa;
+    DXGKVMM_HOST_APERTURE_RUN   HostApertureRun;
 
     /* Portable update descriptors; not overlaid on native table storage. */
     DXGK_PTE                    *Entries;
@@ -2555,6 +2613,32 @@ VOID
 DxgkLeaveSchedulerClass(
     _In_ PDXGKRNL_ADAPTER Adapter);
 
+#define DXGKP_BLOCKLIST_GPU_PV_ALL           0x00000080
+#define DXGKP_BLOCKLIST_GPU_P_ALL            0x00000100
+#define DXGKP_BLOCKLIST_GPU_PV_HIGH_SECURITY 0x00000200
+#define DXGKP_BLOCKLIST_DISABLE_MPO          0x00000400
+#define DXGKP_BLOCKLIST_DISABLE_HWSCH        0x00000800
+
+VOID
+DxgkpQueryDriverWddmDeviceCaps(
+    _Inout_ PDXGKRNL_ADAPTER Adapter);
+
+NTSTATUS
+DxgkpInitializeBlockList(
+    _Inout_ PDXGKRNL_ADAPTER Adapter,
+    _In_ DXGK_WDDMVERSION WddmVersion);
+
+VOID
+DxgkpDestroyBlockList(
+    _Inout_ PDXGKRNL_ADAPTER Adapter);
+
+NTSTATUS
+DxgkpReadBlockList(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _Inout_updates_bytes_(BufferSize) D3DKMT_BLOCKLIST_INFO *Info,
+    _In_ ULONG BufferSize,
+    _In_ BOOLEAN Kernel);
+
 BOOLEAN
 DxgkAcquireKmdCall(
     _In_ PDXGKRNL_ADAPTER Adapter);
@@ -2593,6 +2677,20 @@ DxgkQueryFeatureState(
     _In_opt_ PDXGKRNL_ADAPTER Adapter,
     _In_ DXGK_FEATURE_ID FeatureId,
     _Out_ DXGK_ISFEATUREENABLED_RESULT *Result);
+
+VOID
+DxgkAcquireKmdFeatureInterface(
+    _Inout_ PDXGKRNL_ADAPTER Adapter);
+
+VOID
+DxgkReleaseKmdFeatureInterface(
+    _Inout_ PDXGKRNL_ADAPTER Adapter);
+
+NTSTATUS
+DxgkQueryFeatureInterfaceAvailability(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ DXGK_FEATURE_ID FeatureId,
+    _In_ DXGK_FEATURE_VERSION Version);
 #endif
 
 VOID
@@ -3281,6 +3379,11 @@ DxgkCreateOverlayWithAccessMode(
 
 NTSTATUS
 NTAPI
+DxgkGetOverlayState(
+    _Inout_ D3DKMT_GETOVERLAYSTATE *Data);
+
+NTSTATUS
+NTAPI
 DxgkUpdateOverlay(
     _In_ CONST D3DKMT_UPDATEOVERLAY *Data);
 
@@ -3636,8 +3739,14 @@ DxgkCreateCaptureSurface(
     _In_ PDXGKRNL_DEVICE Device,
     _Inout_ struct _DXGK_REDIRECTION_SURFACE_CREATE *Create);
 
+NTSTATUS
+DxgkCreateGdiTextureSurface(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _Inout_ struct _DXGK_REDIRECTION_SURFACE_CREATE *Create);
+
 /* Adapter device cleanup owns the resources; discard only the cache record. */
 VOID DxgkpForgetCddCapture(_In_ PDXGKRNL_ADAPTER Adapter);
+VOID DxgkForgetGdiBltTextures(_In_ PDXGKRNL_ADAPTER Adapter);
 
 NTSTATUS
 DxgkDestroyRedirectionSurface(
@@ -3679,6 +3788,16 @@ DxgkPublishRedirectionPresent(
 
 NTSTATUS
 DxgkQueryWindowPresentState(_In_ ULONG_PTR WindowHandle);
+
+NTSTATUS
+DxgkIssueWindowBltTarget(
+    _In_ ULONG_PTR WindowHandle,
+    _Out_ PDXGKRNL_WINDOW_BLT_TARGET Target);
+
+VOID
+DxgkCancelWindowBltTarget(
+    _In_ ULONG_PTR WindowHandle,
+    _In_ ULONGLONG UpdateId);
 
 VOID
 DxgkRequestCompositionRefresh(VOID);
@@ -3809,6 +3928,10 @@ VOID
 DxgkDisplayNotifyMonitorEvent(
     _In_ PDXGKRNL_ADAPTER Adapter);
 
+VOID
+DxgkDisplayPresentBootScreen(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
 NTSTATUS
 DxgkVidPnResolveTargetForSource(
     _In_ PDXGKRNL_ADAPTER Adapter,
@@ -3912,6 +4035,16 @@ DxgkPresentQueryVidPnSourceStats(
 VOID
 DxgkPresentAccountFrame(
     _In_ PDXGKRNL_ADAPTER               Adapter,
+    _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId);
+
+LONG
+DxgkPresentGetFrameCount(
+    _In_ PDXGKRNL_ADAPTER               Adapter,
+    _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId);
+
+VOID
+DxgkPresentSetVisibilityIfDeferred(
+    _In_ PDXGKRNL_ADAPTER Adapter,
     _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId);
 
 VOID
@@ -4169,6 +4302,7 @@ typedef struct _DXGKRNL_PAGING_OP
     ULONG                       PageTableLevel;
     DXGK_PAGETABLEUPDATEADDRESS PageTableAddress;
     DXGK_PTE                   *PageTableEntries;
+    DXGK_PTE                   *PageTableEntries64KB;
     ULONG                       StartIndex;
     ULONG                       NumPageTableEntries;
     ULONG64                     AllocationOffsetInBytes;
@@ -4531,6 +4665,12 @@ DxgkCommitTrackedDmaBuffer(
 VOID
 NTAPI
 DxgkAdoptTrackedDmaBuffer(
+    _In_ PDXGKRNL_SUBMIT_DMA_BUFFER Entry);
+
+/* The scheduler refused an adopted submission: its device work goes back to the submitter. */
+VOID
+NTAPI
+DxgkReturnAdoptedTrackedDmaBufferDeviceWork(
     _In_ PDXGKRNL_SUBMIT_DMA_BUFFER Entry);
 
 NTSTATUS

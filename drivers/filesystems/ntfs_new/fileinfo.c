@@ -299,6 +299,76 @@ GetFileInternalInformation(_In_ PFileContextBlock FileCB,
 
 static
 NTSTATUS
+GetFileReparseTag(_In_ PFileContextBlock FileCB,
+                  _In_ ULONG FileAttributes,
+                  _Out_ PULONG ReparseTag)
+{
+    PReparsePointEx ReparseData;
+    ULONG ReparseLength = 0;
+    NTSTATUS Status;
+
+    *ReparseTag = 0;
+    if (!(FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        return STATUS_SUCCESS;
+
+    Status = NtfsFileRecordReadReparsePoint(FileCB->FileRec, NULL, &ReparseLength);
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+        return NT_SUCCESS(Status) ? STATUS_FILE_CORRUPT_ERROR : Status;
+    ReparseData = ExAllocatePoolWithTag(PagedPool, ReparseLength, TAG_NTFS);
+    if (!ReparseData)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = NtfsFileRecordReadReparsePoint(FileCB->FileRec, (PUCHAR)ReparseData, &ReparseLength);
+    if (NT_SUCCESS(Status))
+        *ReparseTag = ReparseData->ReparseType;
+    ExFreePoolWithTag(ReparseData, TAG_NTFS);
+    return Status;
+}
+
+static
+NTSTATUS
+GetFileStatInformation(_In_ PVolumeContextBlock VolCB,
+                       _In_ PFileContextBlock FileCB,
+                       _In_ BOOLEAN Lx,
+                       _Out_ PFILE_STAT_LX_INFORMATION Buffer,
+                       _Inout_ PULONG Length)
+{
+    ULONG Size = Lx ? sizeof(FILE_STAT_LX_INFORMATION) : sizeof(FILE_STAT_INFORMATION);
+    FILE_BASIC_INFORMATION Basic;
+    FILE_STANDARD_INFORMATION Standard;
+    ULONG BasicLength = sizeof(Basic), StandardLength = sizeof(Standard);
+    NTSTATUS Status;
+
+    if (*Length < Size)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Status = GetFileBasicInformation(FileCB, &Basic, &BasicLength);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = GetFileStandardInformation(VolCB, FileCB, &Standard, &StandardLength);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Buffer->FileId.QuadPart = NtfsFileRecordGetReference(FileCB->FileRec);
+    Buffer->CreationTime = Basic.CreationTime;
+    Buffer->LastAccessTime = Basic.LastAccessTime;
+    Buffer->LastWriteTime = Basic.LastWriteTime;
+    Buffer->ChangeTime = Basic.ChangeTime;
+    Buffer->AllocationSize = Standard.AllocationSize;
+    Buffer->EndOfFile = Standard.EndOfFile;
+    Buffer->FileAttributes = Basic.FileAttributes;
+    Buffer->NumberOfLinks = Standard.NumberOfLinks;
+    /* FIXME: Windows reports the caller's maximum access to the file here, not the access granted to this open */
+    Buffer->EffectiveAccess = FileCB->DesiredAccess;
+    Status = GetFileReparseTag(FileCB, Basic.FileAttributes, &Buffer->ReparseTag);
+    if (NT_SUCCESS(Status) && Lx)
+        Status = NtfsQueryLxMetadata(FileCB, Buffer);
+    if (NT_SUCCESS(Status))
+        *Length -= Size;
+    return Status;
+}
+
+static
+NTSTATUS
 GetFileIdInformation(_In_ PVolumeContextBlock VolCB,
                      _In_ PFileContextBlock FileCB,
                      _Out_ PFILE_ID_INFORMATION Buffer,
@@ -1974,6 +2044,8 @@ NtfsSetRenameInformation(_In_ PVolumeContextBlock VolCB,
                              SameParent ? FILE_ACTION_RENAMED_OLD_NAME : FILE_ACTION_REMOVED);
     }
 
+    if (IsDirectory)
+        NtfsEvictCachedRecordsUnder(VolCB, FileCB->FileName.Buffer, FileCB->FileName.Length / sizeof(WCHAR));
     for (NameIndex = 0; NameIndex < RenamedCount; NameIndex++)
     {
         PFileContextBlock Other = RenamedFiles[NameIndex];
@@ -2133,6 +2205,8 @@ NtfsFsdQueryInformation(_In_    PDEVICE_OBJECT VolumeDeviceObject,
         case FileNormalizedNameInformation:
         case FileIdInformation:
         case FileCaseSensitiveInformation:
+        case FileStatInformation:
+        case FileStatLxInformation:
             if (!FileCB->FileRec || !VolCB || !VolCB->DiskVolume)
             {
                 Status = STATUS_INVALID_PARAMETER;
@@ -2186,6 +2260,11 @@ NtfsFsdQueryInformation(_In_    PDEVICE_OBJECT VolumeDeviceObject,
             Status = GetFileIdInformation(VolumeDeviceObject->DeviceExtension, FileCB,
                                           (PFILE_ID_INFORMATION)SystemBuffer,
                                           &BufferLength);
+            break;
+        case FileStatInformation:
+        case FileStatLxInformation:
+            Status = GetFileStatInformation(VolCB, FileCB, FileInfoRequest == FileStatLxInformation,
+                                            (PFILE_STAT_LX_INFORMATION)SystemBuffer, &BufferLength);
             break;
         case FileNetworkOpenInformation:
             Status = GetFileNetworkOpenInformation(FileCB,
@@ -2282,34 +2361,9 @@ NtfsFsdQueryInformation(_In_    PDEVICE_OBJECT VolumeDeviceObject,
 
             Tag->FileAttributes = Basic.FileAttributes ? Basic.FileAttributes
                                                        : FILE_ATTRIBUTE_NORMAL;
-            Tag->ReparseTag = 0;
-            if (Basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-            {
-                PReparsePointEx ReparseData;
-                ULONG ReparseLength = 0;
-
-                Status = NtfsFileRecordReadReparsePoint(FileCB->FileRec, NULL, &ReparseLength);
-                if (Status != STATUS_BUFFER_TOO_SMALL)
-                {
-                    if (NT_SUCCESS(Status))
-                        Status = STATUS_FILE_CORRUPT_ERROR;
-                    break;
-                }
-                ReparseData = ExAllocatePoolWithTag(PagedPool, ReparseLength, TAG_NTFS);
-                if (!ReparseData)
-                {
-                    Status = STATUS_INSUFFICIENT_RESOURCES;
-                    break;
-                }
-                Status = NtfsFileRecordReadReparsePoint(FileCB->FileRec,
-                                                        (PUCHAR)ReparseData,
-                                                        &ReparseLength);
-                if (NT_SUCCESS(Status))
-                    Tag->ReparseTag = ReparseData->ReparseType;
-                ExFreePoolWithTag(ReparseData, TAG_NTFS);
-                if (!NT_SUCCESS(Status))
-                    break;
-            }
+            Status = GetFileReparseTag(FileCB, Basic.FileAttributes, &Tag->ReparseTag);
+            if (!NT_SUCCESS(Status))
+                break;
             BufferLength -= sizeof(FILE_ATTRIBUTE_TAG_INFORMATION);
             break;
         }
@@ -2457,6 +2511,132 @@ NtfsCheckDirectoryEmpty(_In_ PVolumeContextBlock VolCB,
     return Status;
 }
 
+static
+NTSTATUS
+NtfsSetDisposition(_In_ PVolumeContextBlock VolCB,
+                   _In_ PFileContextBlock FileCB,
+                   _In_ PFILE_OBJECT FileObject,
+                   _In_ ULONG Flags)
+{
+    BOOLEAN Delete = !!(Flags & FILE_DISPOSITION_DELETE);
+    NTSTATUS Status;
+
+    if (Flags & ~(FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS |
+                  FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK | FILE_DISPOSITION_ON_CLOSE |
+                  FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!(FileCB->DesiredAccess & DELETE))
+        return STATUS_ACCESS_DENIED;
+    if (NtfsVolumeIsReadOnly(VolCB->DiskVolume))
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if (FileCB->NativeCcb.Lcb && NtfsIsLinkDetached(FileCB->NativeCcb.Lcb))
+        return STATUS_DELETE_PENDING;
+
+    if (Flags & FILE_DISPOSITION_ON_CLOSE)
+    {
+        if (Delete)
+            FileCB->CreateOptions |= FILE_DELETE_ON_CLOSE;
+        else
+            FileCB->CreateOptions &= ~FILE_DELETE_ON_CLOSE;
+        return STATUS_SUCCESS;
+    }
+
+    if (Delete)
+    {
+        NtfsFileBasicInformation DispositionBasic;
+
+        Status = NtfsRefreshDirectoryRecord(VolCB, FileCB);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Status = NtfsFileRecordGetBasicInformation(FileCB->FileRec, &DispositionBasic);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if ((DispositionBasic.FileAttributes & FILE_ATTRIBUTE_READONLY) &&
+            !(Flags & FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE))
+        {
+            return STATUS_CANNOT_DELETE;
+        }
+        Status = NtfsCheckDirectoryEmpty(VolCB, FileCB);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (FileCB->StreamCB &&
+            (!MmFlushImageSection(&FileCB->StreamCB->SectionObjectPointers, MmFlushForDelete) ||
+             !MmCanFileBeTruncated(&FileCB->StreamCB->SectionObjectPointers, NULL)))
+        {
+            return STATUS_CANNOT_DELETE;
+        }
+    }
+
+    if (FileCB->NativeCcb.Lcb &&
+        !(FileCB->RequestedType == TypeData &&
+          FileCB->RequestedStream && FileCB->RequestedStream[0]))
+    {
+        NtfsSetLinkDeletePending(FileCB, Delete);
+        FileCB->PosixDelete = Delete && (Flags & FILE_DISPOSITION_POSIX_SEMANTICS);
+    }
+    else
+    {
+        if (!FileCB->NativeCcb.Lcb)
+            FileCB->DeletePending = Delete;
+        if (FileCB->StreamCB)
+            FileCB->StreamCB->DeletePending = Delete;
+        FileObject->DeletePending = FileCB->DeletePending || Delete;
+    }
+    if (Delete && FileCB->FileDir && VolCB->NotifySync)
+    {
+        FsRtlNotifyFullChangeDirectory(VolCB->NotifySync,
+                                       &VolCB->NotifyList,
+                                       FileObject->FsContext,
+                                       NULL,
+                                       FALSE,
+                                       FALSE,
+                                       0,
+                                       NULL,
+                                       NULL,
+                                       NULL);
+    }
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NtfsSetDispositionInformation(_In_ PVolumeContextBlock VolCB,
+                              _In_ PFileContextBlock FileCB,
+                              _In_ PFILE_OBJECT FileObject,
+                              _In_ FILE_INFORMATION_CLASS InformationClass,
+                              _In_ PVOID Buffer,
+                              _In_ ULONG BufferLength)
+{
+    ULONG Flags;
+    NTSTATUS Status;
+
+    if (InformationClass == FileDispositionInformation)
+    {
+        if (BufferLength < sizeof(FILE_DISPOSITION_INFORMATION))
+            return STATUS_INFO_LENGTH_MISMATCH;
+        Flags = ((PFILE_DISPOSITION_INFORMATION)Buffer)->DeleteFile ? FILE_DISPOSITION_DELETE : 0;
+    }
+    else
+    {
+        if (BufferLength < sizeof(FILE_DISPOSITION_INFORMATION_EX))
+            return STATUS_INFO_LENGTH_MISMATCH;
+        Flags = ((PFILE_DISPOSITION_INFORMATION_EX)Buffer)->Flags;
+    }
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(NtfsGetMainResource(FileCB), TRUE);
+    ExAcquireResourceExclusiveLite(NtfsGetPagingIoResource(FileCB), TRUE);
+    NtfsAcquireMetadata(VolCB);
+    Status = NtfsSetDisposition(VolCB, FileCB, FileObject, Flags);
+    NtfsReleaseMetadata(VolCB);
+    ExReleaseResourceLite(NtfsGetPagingIoResource(FileCB));
+    ExReleaseResourceLite(NtfsGetMainResource(FileCB));
+    KeLeaveCriticalRegion();
+    return Status;
+}
+
 _Function_class_(IRP_MJ_SET_INFORMATION)
 _Function_class_(DRIVER_DISPATCH)
 NTSTATUS
@@ -2510,6 +2690,17 @@ NtfsFsdSetInformation(_In_ PDEVICE_OBJECT VolumeDeviceObject,
     {
         Status = STATUS_INVALID_USER_BUFFER;
         goto Complete;
+    }
+    if (IrpSp->Parameters.SetFile.FileInformationClass == FileDispositionInformation ||
+        IrpSp->Parameters.SetFile.FileInformationClass == FileDispositionInformationEx)
+    {
+        Status = NtfsSetDispositionInformation(VolCB, FileCB, FileObject,
+                                               IrpSp->Parameters.SetFile.FileInformationClass,
+                                               SystemBuffer, BufferLength);
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+        return Status;
     }
 
     KeEnterCriticalRegion();
@@ -2683,91 +2874,6 @@ NtfsFsdSetInformation(_In_ PDEVICE_OBJECT VolumeDeviceObject,
                 (CaseSensitive->Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR) != 0);
             if (NT_SUCCESS(Status))
                 InterlockedIncrement(&VolCB->DirGeneration);
-            goto Complete;
-        }
-
-        case FileDispositionInformation:
-        {
-            PFILE_DISPOSITION_INFORMATION Disposition =
-                (PFILE_DISPOSITION_INFORMATION)SystemBuffer;
-
-            if (BufferLength < sizeof(FILE_DISPOSITION_INFORMATION))
-            {
-                Status = STATUS_INFO_LENGTH_MISMATCH;
-                goto Complete;
-            }
-            if (!(FileCB->DesiredAccess & DELETE))
-            {
-                Status = STATUS_ACCESS_DENIED;
-                goto Complete;
-            }
-            if (NtfsVolumeIsReadOnly(VolCB->DiskVolume))
-            {
-                Status = STATUS_MEDIA_WRITE_PROTECTED;
-                goto Complete;
-            }
-
-            /* A read-only file is not deletable until the attribute goes. */
-            if (Disposition->DeleteFile)
-            {
-                NtfsFileBasicInformation DispositionBasic;
-
-                Status = NtfsRefreshDirectoryRecord(VolCB, FileCB);
-                if (!NT_SUCCESS(Status))
-                    goto Complete;
-
-                Status = NtfsFileRecordGetBasicInformation(FileCB->FileRec, &DispositionBasic);
-                if (!NT_SUCCESS(Status))
-                    goto Complete;
-                if (DispositionBasic.FileAttributes & FILE_ATTRIBUTE_READONLY)
-                {
-                    Status = STATUS_CANNOT_DELETE;
-                    goto Complete;
-                }
-
-                Status = NtfsCheckDirectoryEmpty(VolCB, FileCB);
-                if (!NT_SUCCESS(Status))
-                    goto Complete;
-
-                if (FileCB->StreamCB &&
-                    (!MmFlushImageSection(&FileCB->StreamCB->SectionObjectPointers, MmFlushForDelete) ||
-                     !MmCanFileBeTruncated(&FileCB->StreamCB->SectionObjectPointers, NULL)))
-                {
-                    Status = STATUS_CANNOT_DELETE;
-                    goto Complete;
-                }
-            }
-
-            /* The name is only removed once the last handle is gone. */
-            if (FileCB->NativeCcb.Lcb &&
-                !(FileCB->RequestedType == TypeData &&
-                  FileCB->RequestedStream && FileCB->RequestedStream[0]))
-            {
-                NtfsSetLinkDeletePending(FileCB, !!Disposition->DeleteFile);
-            }
-            else
-            {
-                if (!FileCB->NativeCcb.Lcb)
-                    FileCB->DeletePending = !!Disposition->DeleteFile;
-                if (FileCB->StreamCB)
-                    FileCB->StreamCB->DeletePending = !!Disposition->DeleteFile;
-                FileObject->DeletePending = FileCB->DeletePending ||
-                                           !!Disposition->DeleteFile;
-            }
-            if (Disposition->DeleteFile && FileCB->FileDir && VolCB->NotifySync)
-            {
-                FsRtlNotifyFullChangeDirectory(VolCB->NotifySync,
-                                               &VolCB->NotifyList,
-                                               FileObject->FsContext,
-                                               NULL,
-                                               FALSE,
-                                               FALSE,
-                                               0,
-                                               NULL,
-                                               NULL,
-                                               NULL);
-            }
-            Status = STATUS_SUCCESS;
             goto Complete;
         }
 

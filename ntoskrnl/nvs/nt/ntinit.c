@@ -363,6 +363,17 @@ MiPrepareDirectMap(VOID)
 }
 
 static
+ULONG64
+MiProcessTlbProcessors(
+    _In_ PVOID Owner)
+{
+    PEPROCESS Process = Owner;
+
+    KeMemoryBarrier();
+    return (ULONG64)*(volatile KAFFINITY *)&Process->Pcb.ActiveProcessors;
+}
+
+static
 VOID
 MiInitializePhase0(
     _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
@@ -459,7 +470,7 @@ MiInitializePhase0(
     {
         /* System PTE demand (kernel stacks, device and display mappings,
          * driver images) does not shrink with physical memory. */
-        SystemPteBytes = 128 * _1MB;
+        SystemPteBytes = 512 * _1MB;
         NonPagedBytes = MiClampBytes(PhysicalBytes / 8, 64 * _1MB, 128 * _1MB);
         PagedBytes = MiClampBytes(PhysicalBytes / 4, 128 * _1MB, 256 * _1MB);
     }
@@ -582,6 +593,7 @@ MiInitializePhase0(
     MiSystem.UnusedSegmentLimit = MI_NT_UNUSED_SEGMENT_LIMIT;
     MiSystem.ChargeOwnerCommit = MiChargeProcessCommit;
     MiSystem.ReturnOwnerCommit = MiReturnProcessCommit;
+    MiSystem.OwnerProcessors = MiProcessTlbProcessors;
     MmTotalCommitLimit = (SIZE_T)MiSystem.CommitLimit;
     MmTotalCommitLimitMaximum = MmTotalCommitLimit;
     MmtotalCommitLimitMaximum = MmTotalCommitLimit;

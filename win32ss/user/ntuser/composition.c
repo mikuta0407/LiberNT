@@ -61,6 +61,7 @@ typedef struct _REDIRECT_ENTRY
     BOOL         MinRectValid;
     RECTL        MinRect;
     ULONG        AnimFlags;
+    BOOL         AnimPending;
     LONGLONG     AnimStart;
     LONGLONG     AnimDuration;
     RECTL        AnimRect;
@@ -1530,6 +1531,7 @@ IntCompositionCancelAnimation(_Inout_ REDIRECT_ENTRY *Entry)
         return;
 
     Entry->AnimFlags = 0;
+    Entry->AnimPending = FALSE;
     if (IntCompositionAccumulatePositionDamage(&Entry->AnimDamage))
         IntCompositionMarkDamage(FALSE);
 }
@@ -1550,7 +1552,7 @@ IntCompositionStartAnimation(_Inout_ REDIRECT_ENTRY *Entry,
         return;
     }
 
-    if (Entry->Redirect.FrontHeld && Entry->Wnd != NULL)
+    if (Entry->Redirect.FrontHeld && Entry->Wnd != NULL && Flags != DWM_ANIM_MAXIMIZE)
     {
         IntCompositionDamageHeld(&Entry->Redirect, (PRECTL)&Entry->Wnd->rcWindow);
         Entry->Redirect.FrontScaled = TRUE;
@@ -1564,12 +1566,12 @@ IntCompositionStartAnimation(_Inout_ REDIRECT_ENTRY *Entry,
     Entry->AnimStart = (LONGLONG)KeQueryInterruptTime();
     if (Flags == DWM_ANIM_MINIMIZE)
         Entry->AnimDuration = COMPOSITION_ANIM_MINIMIZE_100NS;
-    else if (Flags == DWM_ANIM_MOVE)
+    else if (Flags == DWM_ANIM_MOVE || Flags == DWM_ANIM_MAXIMIZE)
         Entry->AnimDuration = COMPOSITION_ANIM_MOVE_100NS;
     else
         Entry->AnimDuration = COMPOSITION_ANIM_RESTORE_100NS;
     Entry->AnimDamage = (Flags == DWM_ANIM_MINIMIZE) ? *Window : *Target;
-    if (Flags == DWM_ANIM_MOVE)
+    if (Flags == DWM_ANIM_MOVE || Flags == DWM_ANIM_MAXIMIZE)
         RECTL_bUnionRect(&Entry->AnimDamage, (PRECTL)Window, (PRECTL)Target);
     IntCompositionMarkDamage(FALSE);
 }
@@ -1628,7 +1630,7 @@ IntCompositionEvaluateAnimation(_Inout_ REDIRECT_ENTRY *Entry,
         RECTL_bUnionRect(prcDamage, &Entry->AnimDamage, &Entry->AnimRect);
         /* A move ends at its target, not where it started: the window is drawn
          * there at full size on this frame, beyond the last interpolated rect. */
-        if (Entry->AnimFlags == DWM_ANIM_MOVE)
+        if (Entry->AnimFlags == DWM_ANIM_MOVE || Entry->AnimFlags == DWM_ANIM_MAXIMIZE)
             RECTL_bUnionRect(prcDamage, prcDamage, &Entry->AnimTarget);
         Entry->AnimFlags = 0;
         return FALSE;
@@ -1642,7 +1644,7 @@ IntCompositionEvaluateAnimation(_Inout_ REDIRECT_ENTRY *Entry,
     else
         s = IntCompositionEase(u, FALSE);
 
-    if (Entry->AnimFlags == DWM_ANIM_MOVE)
+    if (Entry->AnimFlags == DWM_ANIM_MOVE || Entry->AnimFlags == DWM_ANIM_MAXIMIZE)
     {
         rc.left = IntCompositionAnimEdge(Entry->AnimTarget.left,
                                          Entry->AnimRect.left, s);
@@ -1850,6 +1852,7 @@ IntCompositionOnWindowResize(_In_ PWND Wnd)
     BOOL OldWindowRectValid;
     BOOL Minimized;
     BOOL WasMinimized;
+    BOOL MaximizeStarted = FALSE;
 
     if (!gbCompositionEnabled)
         return;
@@ -1889,8 +1892,9 @@ IntCompositionOnWindowResize(_In_ PWND Wnd)
     else if (g_DwmAttached && OldWindowRectValid &&
              Maximized != e->Maximized)
     {
-        IntCompositionStartAnimation(e, &OldWindowRect,
-                                     (PRECTL)&Wnd->rcWindow, DWM_ANIM_MOVE);
+        IntCompositionStartAnimation(e, &OldWindowRect, (PRECTL)&Wnd->rcWindow,
+                                     Maximized ? DWM_ANIM_MAXIMIZE : DWM_ANIM_MOVE);
+        MaximizeStarted = e->AnimFlags == DWM_ANIM_MAXIMIZE;
     }
     else if (e->AnimFlags != 0 && OldWindowRectValid &&
              (OldWindowRect.left != Wnd->rcWindow.left ||
@@ -1941,7 +1945,8 @@ IntCompositionOnWindowResize(_In_ PWND Wnd)
         {
             InterlockedExchange(&e->BackComplete, FALSE);
             e->Damaged = TRUE;
-            if (e->Redirect.FrontHeld && e->AnimFlags != 0)
+            if (e->Redirect.FrontHeld && e->AnimFlags != 0 &&
+                e->AnimFlags != DWM_ANIM_MAXIMIZE)
             {
                 e->Redirect.FrontScaled = TRUE;
                 e->Redirect.FrontOffset.x = e->Redirect.FrontOffset.y = 0;
@@ -1953,6 +1958,8 @@ IntCompositionOnWindowResize(_In_ PWND Wnd)
                 e->Redirect.FrontOffset.y += OldWindowRect.top - Wnd->rcWindow.top;
             }
         }
+        if (MaximizeStarted && e->Redirect.FrontHeld && !e->Redirect.FrontScaled)
+            e->AnimPending = TRUE;
         if (IntCompositionDamageHeld(&e->Redirect, (PRECTL)&Wnd->rcWindow))
             IntCompositionMarkDamage(FALSE);
     }
@@ -3212,7 +3219,12 @@ IntCompositionDwmGetFrame(_In_ PVOID pUser)
         g_DwmFrameWindows[count].AnimY = 0;
         g_DwmFrameWindows[count].AnimCx = 0;
         g_DwmFrameWindows[count].AnimCy = 0;
-        if (e->AnimFlags != 0)
+        if (e->AnimPending && !Held)
+        {
+            e->AnimPending = FALSE;
+            e->AnimStart = now;
+        }
+        if (e->AnimFlags != 0 && !e->AnimPending)
         {
             RECTL rcAnim, rcAnimDamage;
             ULONG AnimFlags = e->AnimFlags;
@@ -3266,7 +3278,9 @@ IntCompositionDwmGetFrame(_In_ PVOID pUser)
             }
             if ((!(w->style & (WS_MINIMIZE | WS_MAXIMIZE)) ||
                  ((w->style & WS_MAXIMIZE) &&
-                  g_DwmFrameWindows[count].AnimFlags == DWM_ANIM_MOVE)) &&
+                  (g_DwmFrameWindows[count].AnimFlags == DWM_ANIM_MOVE ||
+                   g_DwmFrameWindows[count].AnimFlags == DWM_ANIM_MAXIMIZE ||
+                   e->AnimPending))) &&
                 UserHasWindowEdge(w->style, w->ExStyle))
             {
                 lf |= DWM_WINDOW_NC_SHADOW;
@@ -3680,6 +3694,7 @@ IntCompositionDwmAttach(_In_ PVOID pUser)
     PKEVENT WakeEvent = NULL;
     PEPROCESS CurrentProcess = PsGetCurrentProcess();
     NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS RegisterStatus;
 
     _SEH2_TRY
     {
@@ -3731,6 +3746,10 @@ IntCompositionDwmAttach(_In_ PVOID pUser)
             ZwClose(hWake);
             return Status;
         }
+
+        RegisterStatus = WddmBridgeRegisterDwmProcess();
+        if (!NT_SUCCESS(RegisterStatus))
+            ERR("DWM registration with dxgkrnl failed 0x%08lx\n", RegisterStatus);
 
         /* The compositor now owns the frame: turn redirection on, retarget
          * every live DC (held GL DCs included) into window backings, and
@@ -3936,6 +3955,134 @@ IntCompositionUpdateDxPlacement(
     Redirect->DxDrawHeight = (ULONG)Height;
     IntCompositionSetDxLayer(SourceWnd, TopWnd, NULL, Redirect);
     return TRUE;
+}
+
+static NTSTATUS
+IntCompositionIssueGdiUpdate(
+    _Inout_ REDIRECT_ENTRY *Entry,
+    _In_ PWND TopWnd,
+    _In_ BOOLEAN SupersedeUnadmitted,
+    _Out_ PULONGLONG UpdateId)
+{
+    if (IntCompositionEnsureSurface(TopWnd, &Entry->Redirect) == NULL ||
+        Entry->Redirect.BackGlobalShare == 0)
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+    /* An issued update that never reached the GPU only versions the surface; a newer present replaces it. */
+    if (SupersedeUnadmitted &&
+        Entry->Redirect.GdiIssuedUpdateId > Entry->Redirect.GdiConsumedUpdateId &&
+        Entry->Redirect.GdiAdmittedUpdateId != Entry->Redirect.GdiIssuedUpdateId &&
+        Entry->Redirect.GdiPublishedUpdateId != Entry->Redirect.GdiIssuedUpdateId)
+    {
+        Entry->Redirect.GdiConsumedUpdateId = Entry->Redirect.GdiIssuedUpdateId;
+    }
+    if (Entry->Redirect.GdiIssuedUpdateId >
+        Entry->Redirect.GdiConsumedUpdateId &&
+        Entry->Redirect.GdiPublishedUpdateId !=
+        Entry->Redirect.GdiIssuedUpdateId)
+    {
+        return STATUS_DEVICE_BUSY;
+    }
+
+    if (++g_GdiUpdateSequence == 0)
+        ++g_GdiUpdateSequence;
+    Entry->Redirect.GdiIssuedUpdateId = g_GdiUpdateSequence;
+    Entry->Redirect.GdiAdmittedUpdateId =
+        Entry->Redirect.GdiConsumedUpdateId;
+    Entry->Redirect.GdiPublishedUpdateId =
+        Entry->Redirect.GdiConsumedUpdateId;
+    *UpdateId = g_GdiUpdateSequence;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+IntCompositionCancelGdiUpdate(
+    _Inout_ REDIRECT_ENTRY *Entry,
+    _In_ ULONGLONG UpdateId)
+{
+    if (UpdateId == 0 ||
+        UpdateId != Entry->Redirect.GdiIssuedUpdateId ||
+        UpdateId <= Entry->Redirect.GdiConsumedUpdateId)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (Entry->Redirect.GdiAdmittedUpdateId == UpdateId)
+        return STATUS_DEVICE_BUSY;
+    Entry->Redirect.GdiConsumedUpdateId = UpdateId;
+    return STATUS_SUCCESS;
+}
+
+static REDIRECT_ENTRY *
+IntCompositionFindOwnedWindow(
+    _In_ HWND hWnd,
+    _Out_ PWND *SourceWnd,
+    _Out_ PWND *TopWnd)
+{
+    PPROCESSINFO ProcessInfo = PsGetCurrentProcessWin32Process();
+
+    *SourceWnd = ValidateHwndNoErr(hWnd);
+    *TopWnd = IntCompositionTopLevel(*SourceWnd);
+    if (*SourceWnd == NULL || *TopWnd == NULL || (*SourceWnd)->head.pti == NULL ||
+        ProcessInfo == NULL || (*SourceWnd)->head.pti->ppi != ProcessInfo)
+    {
+        return NULL;
+    }
+    return IntCompositionFind(*TopWnd);
+}
+
+NTSTATUS
+IntCompositionIssueWindowBltTarget(
+    _In_ HWND hWnd,
+    _Out_ PDXGKRNL_WINDOW_BLT_TARGET Target)
+{
+    REDIRECT_ENTRY *Entry;
+    PWND SourceWnd;
+    PWND TopWnd;
+    RECTL Client;
+    NTSTATUS Status;
+
+    if (!gbCompositionEnabled || !g_DwmAttached)
+        return STATUS_DEVICE_NOT_READY;
+    Entry = IntCompositionFindOwnedWindow(hWnd, &SourceWnd, &TopWnd);
+    if (Entry == NULL)
+        return STATUS_NOT_FOUND;
+
+    Status = IntCompositionIssueGdiUpdate(Entry, TopWnd, TRUE, &Target->UpdateId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Client.left = max(SourceWnd->rcClient.left - TopWnd->rcWindow.left, Entry->Redirect.rcClient.left);
+    Client.top = max(SourceWnd->rcClient.top - TopWnd->rcWindow.top, Entry->Redirect.rcClient.top);
+    Client.right = min(SourceWnd->rcClient.right - TopWnd->rcWindow.left, Entry->Redirect.rcClient.right);
+    Client.bottom = min(SourceWnd->rcClient.bottom - TopWnd->rcWindow.top, Entry->Redirect.rcClient.bottom);
+    if (Client.right <= Client.left || Client.bottom <= Client.top)
+    {
+        (VOID)IntCompositionCancelGdiUpdate(Entry, Target->UpdateId);
+        return STATUS_GRAPHICS_PRESENT_OCCLUDED;
+    }
+
+    Target->GlobalShare = Entry->Redirect.BackGlobalShare;
+    Target->ClientRect.left = Client.left;
+    Target->ClientRect.top = Client.top;
+    Target->ClientRect.right = Client.right;
+    Target->ClientRect.bottom = Client.bottom;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+IntCompositionCancelWindowBltTarget(
+    _In_ HWND hWnd,
+    _In_ ULONGLONG UpdateId)
+{
+    REDIRECT_ENTRY *Entry;
+    PWND SourceWnd;
+    PWND TopWnd;
+
+    Entry = IntCompositionFindOwnedWindow(hWnd, &SourceWnd, &TopWnd);
+    if (Entry == NULL)
+        return STATUS_NOT_FOUND;
+    return IntCompositionCancelGdiUpdate(Entry, UpdateId);
 }
 
 NTSTATUS
@@ -4323,31 +4470,13 @@ IntCompositionDwmDxSurface(_In_ PVOID pUser)
             break;
 
         case DWM_DX_SURFACE_ISSUE_GDI:
-            if (IntCompositionEnsureSurface(TopWnd, &Entry->Redirect) == NULL ||
-                Entry->Redirect.BackGlobalShare == 0)
-            {
-                return STATUS_NOT_SUPPORTED;
-            }
-            if (Entry->Redirect.GdiIssuedUpdateId >
-                Entry->Redirect.GdiConsumedUpdateId &&
-                Entry->Redirect.GdiPublishedUpdateId !=
-                Entry->Redirect.GdiIssuedUpdateId)
-            {
-                return STATUS_DEVICE_BUSY;
-            }
-
-            if (++g_GdiUpdateSequence == 0)
-                ++g_GdiUpdateSequence;
-            Entry->Redirect.GdiIssuedUpdateId = g_GdiUpdateSequence;
-            Entry->Redirect.GdiAdmittedUpdateId =
-                Entry->Redirect.GdiConsumedUpdateId;
-            Entry->Redirect.GdiPublishedUpdateId =
-                Entry->Redirect.GdiConsumedUpdateId;
+            Status = IntCompositionIssueGdiUpdate(Entry, TopWnd, FALSE, &Request.UpdateId);
+            if (!NT_SUCCESS(Status))
+                return Status;
 
             Request.GlobalShare = Entry->Redirect.BackGlobalShare;
             Request.SurfaceId = (ULONG)(Entry - g_Redirects);
             Request.Generation = Entry->Redirect.BackGeneration;
-            Request.UpdateId = g_GdiUpdateSequence;
             Request.Info.Magic = DWM_DX_SURFACE_INFO_MAGIC;
             Request.Info.Version = DWM_DX_SURFACE_INFO_VERSION;
             Request.Info.Width = (ULONG)Entry->Redirect.cx;
@@ -4359,15 +4488,9 @@ IntCompositionDwmDxSurface(_In_ PVOID pUser)
             break;
 
         case DWM_DX_SURFACE_CANCEL_GDI:
-            if (Request.UpdateId == 0 ||
-                Request.UpdateId != Entry->Redirect.GdiIssuedUpdateId ||
-                Request.UpdateId <= Entry->Redirect.GdiConsumedUpdateId)
-            {
-                return STATUS_INVALID_PARAMETER;
-            }
-            if (Entry->Redirect.GdiAdmittedUpdateId == Request.UpdateId)
-                return STATUS_DEVICE_BUSY;
-            Entry->Redirect.GdiConsumedUpdateId = Request.UpdateId;
+            Status = IntCompositionCancelGdiUpdate(Entry, Request.UpdateId);
+            if (!NT_SUCCESS(Status))
+                return Status;
             break;
 
         case DWM_DX_SURFACE_UPDATE_GDI:

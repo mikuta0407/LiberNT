@@ -1,9 +1,11 @@
 
 add_subdirectory(load_notifications)
 add_subdirectory(empty_dll)
+add_subdirectory(ldrfwd)
 
 include_directories($<TARGET_FILE_DIR:load_notifications>)
 include_directories($<TARGET_FILE_DIR:empty_dll>)
+include_directories($<TARGET_FILE_DIR:ldrfwd_a>)
 include_directories(${REACTOS_SOURCE_DIR}/ntoskrnl/include)
 spec2def(ntdll_apitest.exe ntdll_apitest.spec)
 
@@ -53,17 +55,20 @@ set(ALPC_SOURCE
 list(APPEND SOURCE
     DllLoadNotification.c
     DebugRegisters.c
+    FileStatInformation.c
     arm64_chpe.c
     wow64_startup.c
     wow64_native_process.c
     LdrEnumResources.c
     LdrFindResource_U.c
+    LdrForwarderPath.c
     LdrGetDllHandleByName.c
     LdrLoadDll.c
     LdrQueryProcessModuleInformation.c
     load_notifications.c
     locale.c
     memmove.c
+    memset.c
     MemoryAccounting.c
     NtAcceptConnectPort.c
     NtAccessCheck.c
@@ -79,6 +84,7 @@ list(APPEND SOURCE
     NtCreateKeyCached.c
     NtCreateProfile.c
     NtCreateSection.c
+    NtCreateSection_ConcurrentImage.c
     NtCreateThread.c
     NtDeleteKey.c
     NtDuplicateObject.c
@@ -165,6 +171,7 @@ list(APPEND SOURCE
     RtlMemoryStream.c
     RtlMultipleAllocateHeap.c
     RtlNtPathNameToDosPathName.c
+    RtlPortableOperatingSystem.c
     RtlpApplyLengthFunction.c
     RtlpEnsureBufferSize.c
     RtlQueryEnvironmentVariable.c
@@ -173,6 +180,7 @@ list(APPEND SOURCE
     RtlReAllocateHeap.c
     RtlSRWLock.c
     RtlRemovePrivileges.c
+    SehHandlerLocals.c
     RtlUnhandledExceptionFilter.c
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
@@ -202,13 +210,16 @@ if(ARCH STREQUAL "i386")
         i386/NtCreateThread.S
     )
 elseif(ARCH STREQUAL "amd64")
-    list(APPEND SOURCE SyscallStub.c x87Exception.c)
+    list(APPEND SOURCE NullGsSelector.c RtlRestoreContextConsolidate.c SyscallStub.c x87Exception.c)
     add_asm_files(ntdll_apitest_asm
         ../crt/amd64/setjmp_helper.s
         amd64/NtContinue.S
         amd64/NtCreateThread.S
+        amd64/NullGsSelector.S
         amd64/x87Exception.S
     )
+elseif(ARCH STREQUAL "riscv64")
+    list(APPEND SOURCE InstructionCacheMigration.c)
 endif()
 
 list(APPEND PCH_SKIP_SOURCE
@@ -218,6 +229,7 @@ list(APPEND PCH_SKIP_SOURCE
 
 add_rc_deps(testdata.rc ${CMAKE_CURRENT_BINARY_DIR}/load_notifications/load_notifications.dll)
 add_rc_deps(testdata.rc ${CMAKE_CURRENT_BINARY_DIR}/empty_dll/empty_dll.dll)
+add_rc_deps(testdata.rc ${CMAKE_CURRENT_BINARY_DIR}/ldrfwd/ldrfwd_a.dll ${CMAKE_CURRENT_BINARY_DIR}/ldrfwd/ldrfwd_b.dll ${CMAKE_CURRENT_BINARY_DIR}/ldrfwd/ldrfwd_c.dll)
 
 add_executable(ntdll_apitest
     ${SOURCE}
@@ -235,7 +247,7 @@ target_link_libraries(ntdll_apitest ntdll_crt_test_lib rtl_test_lib wine uuid ${
 set_module_type(ntdll_apitest win32cui)
 add_importlibs(ntdll_apitest msvcrt advapi32 kernel32 ntdll)
 add_pch(ntdll_apitest precomp.h "${PCH_SKIP_SOURCE}")
-add_dependencies(ntdll_apitest load_notifications empty_dll)
+add_dependencies(ntdll_apitest load_notifications empty_dll ldrfwd_a ldrfwd_b ldrfwd_c)
 
 add_rostests_file(TARGET ntdll_apitest)
 add_rostests_file(TARGET ntdll_apitest SUBDIR testdata)

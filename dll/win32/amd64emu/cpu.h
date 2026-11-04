@@ -101,6 +101,22 @@ EmuCoreInvalidate(
     _In_ PVOID Base,
     _In_ SIZE_T Size);
 
+ULONG
+EmuCoreForgetCode(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size);
+
+VOID
+EmuCoreExcludeCode(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size);
+
+VOID
+EmuCoreProtectCode(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size,
+    _In_ ULONG NewProtect);
+
 EMU_FAULT
 EmuCoreFault(
     _In_ PEMU_CPU Cpu,

@@ -222,6 +222,7 @@ typedef struct _LX_TTY
     LONG Index;
     ULONG Uid;
     ULONG Gid;
+    ULONG Mode;
     LX_TERMIOS Termios;
     LX_WINSIZE WinSize;
     ULONG ForegroundPgrp;
@@ -319,6 +320,7 @@ struct _LX_MOUNT
     ULONG64 Magic;
     ULONG Dev;
     UNICODE_STRING NtRoot;
+    HANDLE NtRootHandle;
     PLX_TMPFS Tmpfs;
     PSTR Root;
     PSTR Alias;
@@ -746,6 +748,7 @@ struct _LX_THREAD
     struct _LX_THREAD *Vfork;
     struct _LX_THREAD *VforkParent;
     PCONTEXT VforkContext;
+    PCONTEXT StartContext;
     ULONG64 VforkTls;
     LONG64 VforkPid;
     BOOLEAN VforkExited;
@@ -1016,6 +1019,8 @@ LONG LxFileZeroRange(_In_ PLX_FILE File, _In_ ULONG64 Start, _In_ ULONG64 End);
 VOID LxMemfdDereference(_In_opt_ PLX_MEMFD Memfd);
 LONG LxFileStat(_In_ PLX_FILE File, _Out_ PLX_STAT Stat);
 PLX_FILE LxFileFromNtHandle(_In_ HANDLE Handle, _In_ ULONG Flags);
+PLX_FILE LxFileFromNtHandleOfType(_In_ HANDLE Handle, _In_ ULONG Flags, _In_ BOOLEAN Directory);
+LONG LxNtStatHandle(_In_ HANDLE Handle, _In_opt_ PLX_MOUNT Mount, _Out_ PLX_STAT Stat);
 PLX_FILE LxDataFileCreate(_In_ PCSTR Path, _In_ PVOID Data, _In_ ULONG Length, _In_ ULONG Mode);
 LONG64 LxWriteFailed(_In_ LONG Error);
 LONG64 LxSocketGatherIov(_In_ PLX_MSGHDR Header, _In_ BOOLEAN KernelIov, _Out_ PLX_IOVEC *Vectors, _Out_ PULONG64 Total);
@@ -1267,6 +1272,7 @@ LONG LxSynthOpen(_In_ PLX_PROCESS Process, _In_ PLX_NODE Node, _In_ ULONG Flags,
 LONG LxSynthStat(_In_ PLX_PROCESS Process, _In_ PLX_NODE Node, _Out_ PLX_STAT Stat);
 LONG LxSynthMkdir(_In_ PLX_PROCESS Process, _In_ PLX_NODE Node);
 LONG LxCgroupSetAttributes(_In_ PLX_PROCESS Process, _In_ PLX_NODE Node, _In_ ULONG Mode, _In_ ULONG Uid, _In_ ULONG Gid);
+PLX_TTY LxPtsNodeTty(_In_ PLX_PROCESS Process, _In_ PLX_NODE Node);
 VOID LxTmpfsInitialize(VOID);
 PLX_TMPFS LxTmpfsCreate(_In_ ULONG Mode);
 LONG LxTmpfsParseOptions(_In_ PLX_PROCESS Process, _In_opt_ PCSTR Data, _Inout_ PLX_TMPFS_OPTIONS Options);
@@ -1339,6 +1345,8 @@ LONG64 LxTtyIoctl(_In_ PLX_PROCESS Process, _In_ PLX_TTY Tty, _In_ ULONG Request
 BOOLEAN LxTtyReadable(_In_ PLX_TTY Tty);
 PLX_FILE LxTtyOpen(_In_ PLX_TTY Tty, _In_ ULONG Flags);
 PLX_TTY LxFileGetTty(_In_ PLX_FILE File);
+VOID LxTtyGetAttributes(_In_ PLX_TTY Tty, _Out_ PULONG Mode, _Out_ PULONG Uid, _Out_ PULONG Gid);
+VOID LxTtySetAttributes(_In_ PLX_TTY Tty, _In_ ULONG Mode, _In_ ULONG Uid, _In_ ULONG Gid);
 LONG64 LxTtyMasterRead(_In_ PLX_TTY Tty, _Out_writes_bytes_(Length) PVOID Buffer, _In_ ULONG Length, _In_ BOOLEAN NonBlocking);
 LONG64 LxTtyMasterWrite(_In_ PLX_TTY Tty, _In_reads_bytes_(Length) const VOID *Buffer, _In_ ULONG Length, _In_ BOOLEAN NonBlocking);
 VOID LxTtyMasterClose(_In_ PLX_TTY Tty);
@@ -1571,7 +1579,8 @@ LONG64 LxSpecCtrlGet(_In_ PLX_THREAD Thread, _In_ ULONG64 Which);
 LONG64 LxSpecCtrlSet(_Inout_ PLX_THREAD Thread, _In_ ULONG64 Which, _In_ ULONG64 Control);
 VOID LxSpecExec(_Inout_ PLX_THREAD Thread);
 PCSTR LxArchPlatform(VOID);
-VOID LxArchGetSyscall(_In_ PKTRAP_FRAME TrapFrame, _Out_ PULONG Number, _Out_writes_(6) PULONG64 Args);
+VOID LxArchGetSyscall(_In_ PKTRAP_FRAME TrapFrame, _In_opt_ PKEXCEPTION_FRAME ExceptionFrame, _Out_ PULONG Number,
+                      _Out_writes_(6) PULONG64 Args);
 VOID LxArchSetSyscallResult(_Inout_ PKTRAP_FRAME TrapFrame, _In_ LONG64 Result);
 VOID LxArchRestartSyscall(_Inout_ PKTRAP_FRAME TrapFrame, _In_ ULONG64 Argument);
 BOOLEAN LxArchEmulateInstruction(_In_ PEXCEPTION_RECORD ExceptionRecord, _Inout_opt_ PKEXCEPTION_FRAME ExceptionFrame, _Inout_ PKTRAP_FRAME TrapFrame);
@@ -1589,6 +1598,8 @@ ULONG64 LxArchImageBase(_In_ BOOLEAN Interpreter);
 LONG64 LxArchReadSigaction(_In_ ULONG64 Address, _Out_ PLX_SIGACTION Action);
 LONG64 LxArchWriteSigaction(_In_ ULONG64 Address, _In_ PLX_SIGACTION Action);
 ULONG64 LxArchGetUserPc(_In_ PKTRAP_FRAME TrapFrame);
+ULONG64 LxArchContextPc(_In_ PCONTEXT Context);
+ULONG64 LxArchContextSp(_In_ PCONTEXT Context);
 PLX_SYSCALL_ENTRY LxArchSyscallEntry(_In_ ULONG Number);
 PLX_SYSCALL_ENTRY LxGenericSyscallEntry(_In_ ULONG Number);
 ULONG64 LxArchGetUserSp(_In_ PKTRAP_FRAME TrapFrame);

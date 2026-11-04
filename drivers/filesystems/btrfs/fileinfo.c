@@ -38,6 +38,7 @@ typedef struct _FILE_ID_INFORMATION {
 } FILE_ID_INFORMATION, *PFILE_ID_INFORMATION;
 #endif
 
+#ifndef __REACTOS__
 typedef struct _FILE_STAT_INFORMATION {
     LARGE_INTEGER FileId;
     LARGE_INTEGER CreationTime;
@@ -77,6 +78,7 @@ typedef struct _FILE_STAT_LX_INFORMATION {
 #define LX_FILE_METADATA_HAS_MODE       0x04
 #define LX_FILE_METADATA_HAS_DEVICE_ID  0x08
 #define LX_FILE_CASE_SENSITIVE_DIR      0x10
+#endif
 
 typedef struct _FILE_RENAME_INFORMATION_EX {
     union {
@@ -138,8 +140,12 @@ typedef struct _FILE_LINKS_FULL_ID_INFORMATION {
 #ifndef FILE_DISPOSITION_DELETE
 #define FILE_DISPOSITION_DELETE                         0x1
 #endif
+#ifndef FILE_DISPOSITION_POSIX_SEMANTICS
 #define FILE_DISPOSITION_POSIX_SEMANTICS                0x2
+#endif
+#ifndef FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK
 #define FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK      0x4
+#endif
 #ifndef FILE_DISPOSITION_ON_CLOSE
 #define FILE_DISPOSITION_ON_CLOSE                       0x8
 #endif

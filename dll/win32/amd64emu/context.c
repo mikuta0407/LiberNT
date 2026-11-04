@@ -155,6 +155,79 @@ EmuSuspendThread(
     return Status;
 }
 
+static
+NTSTATUS
+EmuGetStartContextThread(
+    _In_ HANDLE ThreadHandle,
+    _Inout_ AMD64_CONTEXT *Context)
+{
+    THREAD_BASIC_INFORMATION Thread;
+    PROCESS_BASIC_INFORMATION Process;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    ULONG Flags = Context->ContextFlags;
+    HANDLE ProcessHandle;
+    PVOID Ldr = NULL;
+    CONTEXT Native;
+    NTSTATUS Status;
+
+    Native.ContextFlags = CONTEXT_FULL;
+    Status = NtGetContextThread(ThreadHandle, &Native);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    if (Native.Pc != EmuProcess.NativeRtlUserThreadStart)
+    {
+        Status = NtQueryInformationThread(ThreadHandle, ThreadBasicInformation, &Thread, sizeof(Thread), NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+        Status = NtOpenProcess(&ProcessHandle, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                               &ObjectAttributes, &Thread.ClientId);
+        if (!NT_SUCCESS(Status)) return STATUS_NOT_SUPPORTED;
+        Status = NtQueryInformationProcess(ProcessHandle, ProcessBasicInformation, &Process, sizeof(Process), NULL);
+        if (NT_SUCCESS(Status))
+            Status = NtReadVirtualMemory(ProcessHandle, &Process.PebBaseAddress->Ldr, &Ldr, sizeof(Ldr), NULL);
+        NtClose(ProcessHandle);
+        /* TODO: AMD64 contexts of threads that already run in other processes */
+        if (!NT_SUCCESS(Status) || Ldr) return STATUS_NOT_SUPPORTED;
+    }
+
+    EmuBuildNativeStartContext(&Native, Context);
+    Context->ContextFlags = Flags;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+EmuGetNativeViewContextThread(
+    _In_ HANDLE ThreadHandle,
+    _Inout_ AMD64_CONTEXT *Context)
+{
+    THREAD_BASIC_INFORMATION Information;
+    ULONG Flags = Context->ContextFlags;
+    CONTEXT Native;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationThread(ThreadHandle, ThreadBasicInformation, &Information, sizeof(Information), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (Information.ClientId.UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess)
+        return EmuGetStartContextThread(ThreadHandle, Context);
+
+    Native.ContextFlags = CONTEXT_FULL;
+    Status = NtGetContextThread(ThreadHandle, &Native);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (Native.Pc == EmuProcess.NativeRtlUserThreadStart)
+    {
+        EmuBuildNativeStartContext(&Native, Context);
+        Context->ContextFlags = Flags;
+        return STATUS_SUCCESS;
+    }
+    if ((Flags & CONTEXT_AMD64_CONTROL) == CONTEXT_AMD64_CONTROL)
+    {
+        Context->Rip = Native.Pc;
+        Context->Rsp = Native.Sp;
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 EmuGetContextThread(
     _In_ HANDLE ThreadHandle,
@@ -162,6 +235,7 @@ EmuGetContextThread(
 {
     AMD64_CONTEXT Captured = *Context;
     PEMU_THREAD Target;
+    BOOLEAN InHost = FALSE;
     NTSTATUS Status;
 
     if ((Captured.ContextFlags & CONTEXT_AMD64) != CONTEXT_AMD64) return STATUS_INVALID_PARAMETER;
@@ -170,8 +244,16 @@ EmuGetContextThread(
 
     RtlEnterCriticalSection(&EmuProcess.ThreadLock);
     Status = EmuFindThread(ThreadHandle, &Target);
-    if (NT_SUCCESS(Status)) EmuCoreGetContext(Target->Cpu, &Captured);
+    if (NT_SUCCESS(Status))
+    {
+        EmuCoreGetContext(Target->Cpu, &Captured);
+        InHost = Target->HostDepth != 0;
+    }
     RtlLeaveCriticalSection(&EmuProcess.ThreadLock);
+    if (EmuProcess.Attached && (Status == STATUS_NOT_SUPPORTED || InHost) && !EmuIsCurrentThread(ThreadHandle))
+        Status = EmuGetNativeViewContextThread(ThreadHandle, &Captured);
+    else if (Status == STATUS_NOT_SUPPORTED)
+        Status = EmuGetStartContextThread(ThreadHandle, &Captured);
 
     if (NT_SUCCESS(Status)) *Context = Captured;
     return Status;

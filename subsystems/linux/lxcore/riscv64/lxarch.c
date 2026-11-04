@@ -95,9 +95,11 @@ LxArchImageBase(
 VOID
 LxArchGetSyscall(
     _In_ PKTRAP_FRAME TrapFrame,
+    _In_opt_ PKEXCEPTION_FRAME ExceptionFrame,
     _Out_ PULONG Number,
     _Out_writes_(6) PULONG64 Args)
 {
+    UNREFERENCED_PARAMETER(ExceptionFrame);
     *Number = (ULONG)TrapFrame->Context.A7;
     RtlCopyMemory(Args, &TrapFrame->Context.A0, 6 * sizeof(*Args));
 }
@@ -191,6 +193,20 @@ LxArchGetUserPc(
     _In_ PKTRAP_FRAME TrapFrame)
 {
     return TrapFrame->Context.Pc;
+}
+
+ULONG64
+LxArchContextPc(
+    _In_ PCONTEXT Context)
+{
+    return Context->Pc;
+}
+
+ULONG64
+LxArchContextSp(
+    _In_ PCONTEXT Context)
+{
+    return Context->Sp;
 }
 
 ULONG64
@@ -529,7 +545,8 @@ LxArchDeliverAsync(
     Frames->Context.ContextFlags = CONTEXT_FULL | CONTEXT_EXCEPTION_REQUEST;
     if (NT_SUCCESS(PsGetContextThread(PsGetCurrentThread(), &Frames->Context, KernelMode)) &&
         (Frames->Context.ContextFlags & CONTEXT_EXCEPTION_REPORTING) &&
-        !(Frames->Context.ContextFlags & (CONTEXT_SERVICE_ACTIVE | CONTEXT_EXCEPTION_ACTIVE)))
+        !(Frames->Context.ContextFlags & (CONTEXT_SERVICE_ACTIVE | CONTEXT_EXCEPTION_ACTIVE)) &&
+        (Frames->Context.Pc <= (ULONG64)(ULONG_PTR)MmHighestUserAddress))
     {
         Frames->Context.ContextFlags = CONTEXT_FULL;
         LxArchRestoreContext(&Frames->TrapFrame, NULL, &Frames->Context);

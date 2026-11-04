@@ -556,7 +556,7 @@ static DWORD enumerate_ipv6_unicast(struct nsi_enumerate_all_ex *params)
 {
     ULONG count;
     IP6_TABLE_HEADER *header = ip6_query_table(Ip6TableAddresses, &count);
-    IP6_ADDRESS_ROW *rows = (IP6_ADDRESS_ROW *)(header + 1);
+    IP6_ADDRESS_ROW *rows = header ? (IP6_ADDRESS_ROW *)(header + 1) : NULL;
     BOOL want_data = params->key_size || params->rw_size || params->dynamic_size || params->static_size;
     UINT_PTR i, limit = count < params->count ? count : params->count;
 
@@ -657,7 +657,7 @@ static DWORD enumerate_ipv6_forward(struct nsi_enumerate_all_ex *params)
 {
     ULONG count;
     IP6_TABLE_HEADER *header = ip6_query_table(Ip6TableRoutes, &count);
-    IP6_ROUTE_ROW *rows = (IP6_ROUTE_ROW *)(header + 1);
+    IP6_ROUTE_ROW *rows = header ? (IP6_ROUTE_ROW *)(header + 1) : NULL;
     BOOL want_data = params->key_size || params->rw_size || params->dynamic_size || params->static_size;
     UINT_PTR i, limit = count < params->count ? count : params->count;
 
@@ -1798,7 +1798,7 @@ static DWORD table_hash(const NPI_MODULEID *module, UINT table_id, ULONG *result
     /* Interface connectivity lives in the dynamic block. Include it so a
        retained Network List Manager sees link changes, but do not hash the
        traffic counters or continuously changing ages of other tables. */
-    if (table_id == NSI_IP_INTERFACE_TABLE &&
+    if ((table_id == NSI_IP_INTERFACE_TABLE || table_id == NSI_IP_UNICAST_TABLE) &&
         (module_equal(module, &NPI_MS_IPV4_MODULEID) || module_equal(module, &NPI_MS_IPV6_MODULEID)))
         dynamic_size = table->sizes[2];
     memset(&params, 0, sizeof(params));
@@ -1833,6 +1833,17 @@ static DWORD table_hash(const NPI_MODULEID *module, UINT table_id, ULONG *result
         for (i = 0; i < count; i++)
         {
             struct nsi_ip_unicast_rw *row = (struct nsi_ip_unicast_rw *)(rw + i * table->sizes[1]);
+
+            row->preferred_lifetime = row->valid_lifetime = 0;
+        }
+    }
+    if (rw && table_id == NSI_IP_FORWARD_TABLE)
+    {
+        UINT_PTR i;
+
+        for (i = 0; i < count; i++)
+        {
+            struct nsi_ip_forward_rw *row = (struct nsi_ip_forward_rw *)(rw + i * table->sizes[1]);
 
             row->preferred_lifetime = row->valid_lifetime = 0;
         }

@@ -717,6 +717,22 @@ LX_SYSCALL(LxSysGettimeofday)
     return Result;
 }
 
+LX_SYSCALL(LxSysTime)
+{
+    LX_TIMESPEC Now;
+    LONG64 Seconds, Result;
+
+    LxQueryRealtime(&Now);
+    Seconds = Now.Seconds;
+    if (Call->Args[0] != 0)
+    {
+        Result = LxCopyToUser(Call->Args[0], &Seconds, sizeof(Seconds));
+        if (Result != 0)
+            return Result;
+    }
+    return Seconds;
+}
+
 LX_SYSCALL(LxSysNanosleep)
 {
     LX_TIMESPEC Request;
@@ -1401,15 +1417,27 @@ LX_SYSCALL(LxSysSetpriority)
     return 0;
 }
 
-LX_SYSCALL(LxSysSchedGetPriorityMax)
+static
+LONG64
+LxSchedPriorityLimit(
+    _In_ ULONG Policy,
+    _In_ BOOLEAN Maximum)
 {
-    ULONG Policy = (ULONG)Call->Args[0];
-
     if ((Policy == 1) || (Policy == 2))
-        return (Call->Number == 125) ? 99 : 1;
+        return Maximum ? 99 : 1;
     if ((Policy == 0) || (Policy == 3) || (Policy == 5) || (Policy == 6))
         return 0;
     return -LX_EINVAL;
+}
+
+LX_SYSCALL(LxSysSchedGetPriorityMax)
+{
+    return LxSchedPriorityLimit((ULONG)Call->Args[0], TRUE);
+}
+
+LX_SYSCALL(LxSysSchedGetPriorityMin)
+{
+    return LxSchedPriorityLimit((ULONG)Call->Args[0], FALSE);
 }
 
 LX_SYSCALL(LxSysUname)
@@ -1690,20 +1718,30 @@ LX_SYSCALL(LxSysGettid)
 
 LX_SYSCALL(LxSysGetuid)
 {
-    PLX_PROCESS Process = Call->Process;
-
-    switch (Call->Number)
-    {
-        case 174: return LxCredViewId(Process, FALSE, Process->Uid[0]);
-        case 175: return LxCredViewId(Process, FALSE, Process->Uid[1]);
-        case 176: return LxCredViewId(Process, TRUE, Process->Gid[0]);
-        default: return LxCredViewId(Process, TRUE, Process->Gid[1]);
-    }
+    return LxCredViewId(Call->Process, FALSE, Call->Process->Uid[0]);
 }
 
-LX_SYSCALL(LxSysGetresuid)
+LX_SYSCALL(LxSysGeteuid)
 {
-    BOOLEAN Group = (Call->Number != 148);
+    return LxCredViewId(Call->Process, FALSE, Call->Process->Uid[1]);
+}
+
+LX_SYSCALL(LxSysGetgid)
+{
+    return LxCredViewId(Call->Process, TRUE, Call->Process->Gid[0]);
+}
+
+LX_SYSCALL(LxSysGetegid)
+{
+    return LxCredViewId(Call->Process, TRUE, Call->Process->Gid[1]);
+}
+
+static
+LONG64
+LxGetresid(
+    _Inout_ PLX_CALL Call,
+    _In_ BOOLEAN Group)
+{
     PULONG Ids = Group ? Call->Process->Gid : Call->Process->Uid;
     ULONG View[3], Index;
     LONG64 Result = 0;
@@ -1715,6 +1753,16 @@ LX_SYSCALL(LxSysGetresuid)
     return Result;
 }
 
+LX_SYSCALL(LxSysGetresuid)
+{
+    return LxGetresid(Call, FALSE);
+}
+
+LX_SYSCALL(LxSysGetresgid)
+{
+    return LxGetresid(Call, TRUE);
+}
+
 static
 BOOLEAN
 LxSetidKnown(
@@ -1724,11 +1772,22 @@ LxSetidKnown(
     return (Id == Ids[0]) || (Id == Ids[1]) || (Id == Ids[2]);
 }
 
-LX_SYSCALL(LxSysSetid)
+typedef enum _LX_SETID_KIND
+{
+    LxSetidOne,
+    LxSetidRealEffective,
+    LxSetidRealEffectiveSaved,
+    LxSetidFs
+} LX_SETID_KIND;
+
+static
+LONG64
+LxSetid(
+    _Inout_ PLX_CALL Call,
+    _In_ BOOLEAN Group,
+    _In_ LX_SETID_KIND Kind)
 {
     PLX_PROCESS Process = Call->Process;
-    ULONG Number = Call->Number;
-    BOOLEAN Group = (Number == 143) || (Number == 144) || (Number == 149) || (Number == 152);
     BOOLEAN Capable = LxNsCapable(Process, NULL, Group ? LX_CAP_SETGID : LX_CAP_SETUID);
     PULONG Ids = Group ? Process->Gid : Process->Uid;
     PULONG Fs = Group ? &Process->Fsgid : &Process->Fsuid;
@@ -1745,10 +1804,9 @@ LX_SYSCALL(LxSysSetid)
     ExAcquireFastMutex(&Process->Lock);
     LxCredSave(Process, &Old);
     RtlCopyMemory(New, Ids, sizeof(New));
-    switch (Number)
+    switch (Kind)
     {
-        case 146:
-        case 144:
+        case LxSetidOne:
             if (Key[0] == MAXULONG)
                 Result = -LX_EINVAL;
             else if (Capable)
@@ -1759,8 +1817,7 @@ LX_SYSCALL(LxSysSetid)
                 Result = -LX_EPERM;
             break;
 
-        case 145:
-        case 143:
+        case LxSetidRealEffective:
             if (((Arg[0] != MAXULONG) && (Key[0] == MAXULONG)) || ((Arg[1] != MAXULONG) && (Key[1] == MAXULONG)))
                 Result = -LX_EINVAL;
             else if ((Arg[0] != MAXULONG) && (Key[0] != Ids[0]) && (Key[0] != Ids[1]) && !Capable)
@@ -1777,8 +1834,7 @@ LX_SYSCALL(LxSysSetid)
                 New[2] = New[1];
             break;
 
-        case 147:
-        case 149:
+        case LxSetidRealEffectiveSaved:
             for (Index = 0; Index < 3; Index++)
             {
                 if ((Arg[Index] != MAXULONG) && (Key[Index] == MAXULONG))
@@ -1796,8 +1852,7 @@ LX_SYSCALL(LxSysSetid)
             }
             break;
 
-        case 151:
-        case 152:
+        case LxSetidFs:
             Result = LxCredViewId(Process, Group, *Fs);
             if ((Key[0] != MAXULONG) && (Key[0] != *Fs) && (LxSetidKnown(Ids, Key[0]) || Capable))
             {
@@ -1808,10 +1863,6 @@ LX_SYSCALL(LxSysSetid)
             }
             ExReleaseFastMutex(&Process->Lock);
             return Result;
-
-        default:
-            Result = -LX_ENOSYS;
-            break;
     }
     if (Result == 0)
     {
@@ -1823,6 +1874,46 @@ LX_SYSCALL(LxSysSetid)
     }
     ExReleaseFastMutex(&Process->Lock);
     return Result;
+}
+
+LX_SYSCALL(LxSysSetuid)
+{
+    return LxSetid(Call, FALSE, LxSetidOne);
+}
+
+LX_SYSCALL(LxSysSetgid)
+{
+    return LxSetid(Call, TRUE, LxSetidOne);
+}
+
+LX_SYSCALL(LxSysSetreuid)
+{
+    return LxSetid(Call, FALSE, LxSetidRealEffective);
+}
+
+LX_SYSCALL(LxSysSetregid)
+{
+    return LxSetid(Call, TRUE, LxSetidRealEffective);
+}
+
+LX_SYSCALL(LxSysSetresuid)
+{
+    return LxSetid(Call, FALSE, LxSetidRealEffectiveSaved);
+}
+
+LX_SYSCALL(LxSysSetresgid)
+{
+    return LxSetid(Call, TRUE, LxSetidRealEffectiveSaved);
+}
+
+LX_SYSCALL(LxSysSetfsuid)
+{
+    return LxSetid(Call, FALSE, LxSetidFs);
+}
+
+LX_SYSCALL(LxSysSetfsgid)
+{
+    return LxSetid(Call, TRUE, LxSetidFs);
 }
 
 LX_SYSCALL(LxSysGetgroups)
@@ -2215,6 +2306,22 @@ typedef struct _LX_CLONE_REQUEST
 } LX_CLONE_REQUEST, *PLX_CLONE_REQUEST;
 
 static
+NTSTATUS
+LxCreateClonedThread(
+    _In_ HANDLE ProcessHandle,
+    _In_ PCONTEXT Context,
+    _Inout_ PLX_THREAD Thread,
+    _Out_ PHANDLE ThreadHandle,
+    _Out_opt_ PCLIENT_ID ClientId)
+{
+    Thread->StartContext = LxAlloc(sizeof(CONTEXT));
+    if (Thread->StartContext == NULL)
+        return STATUS_NO_MEMORY;
+    *Thread->StartContext = *Context;
+    return PsPicoCreateThread(ProcessHandle, Context, Thread, ThreadHandle, ClientId);
+}
+
+static
 LONG64
 LxCreateThread(
     _In_ PLX_CALL Call,
@@ -2263,7 +2370,7 @@ LxCreateThread(
 
     GlobalTid = Thread->Tid;
     Event = LxPtraceCloneChild(Call->Thread, Thread, Request->Flags, Request->ExitSignal);
-    Status = PsPicoCreateThread(NtCurrentProcess(), Context, Thread, &Handle, &ClientId);
+    Status = LxCreateClonedThread(NtCurrentProcess(), Context, Thread, &Handle, &ClientId);
     if (!NT_SUCCESS(Status))
     {
         LxThreadFree(Thread);
@@ -2488,7 +2595,7 @@ LxForkProcess(
         return 0;
     }
 
-    Status = PsPicoCreateThread(Shared ? NtCurrentProcess() : ProcessHandle, Context, Thread, &ThreadHandle, NULL);
+    Status = LxCreateClonedThread(Shared ? NtCurrentProcess() : ProcessHandle, Context, Thread, &ThreadHandle, NULL);
     if (!NT_SUCCESS(Status) && Shared)
     {
         LxProcessExitStatus(Child, LX_SIGKILL);
@@ -4297,34 +4404,16 @@ LX_SYSCALL(LxSysGetitimer)
     return LxCopyToUser(Call->Args[1], Value, sizeof(Value));
 }
 
-LX_SYSCALL(LxSysSetitimer)
+static
+LONG64
+LxSetRealItimer(
+    _In_ PLX_PROCESS Process,
+    _In_reads_(2) PLX_TIMEVAL New,
+    _Out_writes_(2) PLX_TIMEVAL Old)
 {
-    PLX_PROCESS Process = Call->Process;
-    PLX_ITIMER Timer;
-    LX_TIMEVAL New[2], Old[2];
-    LONG64 Value, Interval, Result, Now;
+    PLX_ITIMER Timer = Process->RealTimer;
+    LONG64 Value, Interval, Now;
 
-    if (Call->Args[0] > 2)
-        return -LX_EINVAL;
-    RtlZeroMemory(New, sizeof(New));
-    if (Call->Args[1] != 0)
-    {
-        Result = LxCopyFromUser(New, Call->Args[1], sizeof(New));
-        if (Result != 0)
-            return Result;
-        if ((New[0].Microseconds < 0) || (New[0].Microseconds >= 1000000) ||
-            (New[1].Microseconds < 0) || (New[1].Microseconds >= 1000000))
-        {
-            return -LX_EINVAL;
-        }
-    }
-    if (Call->Args[0] != 0)
-    {
-        RtlZeroMemory(Old, sizeof(Old));
-        return (Call->Args[2] != 0) ? LxCopyToUser(Call->Args[2], Old, sizeof(Old)) : 0;
-    }
-
-    Timer = Process->RealTimer;
     if (Timer == NULL)
     {
         Timer = LxAlloc(sizeof(*Timer));
@@ -4358,10 +4447,55 @@ LX_SYSCALL(LxSysSetitimer)
     Timer->Due = (Value != 0) ? Now + Value : 0;
     if (Value != 0)
         ExSetTimer(Timer->Timer, -Value, Interval, NULL);
+    return 0;
+}
 
+LX_SYSCALL(LxSysSetitimer)
+{
+    LX_TIMEVAL New[2], Old[2];
+    LONG64 Result;
+
+    if (Call->Args[0] > 2)
+        return -LX_EINVAL;
+    RtlZeroMemory(New, sizeof(New));
+    if (Call->Args[1] != 0)
+    {
+        Result = LxCopyFromUser(New, Call->Args[1], sizeof(New));
+        if (Result != 0)
+            return Result;
+        if ((New[0].Microseconds < 0) || (New[0].Microseconds >= 1000000) ||
+            (New[1].Microseconds < 0) || (New[1].Microseconds >= 1000000))
+        {
+            return -LX_EINVAL;
+        }
+    }
+    if (Call->Args[0] != 0)
+    {
+        RtlZeroMemory(Old, sizeof(Old));
+        return (Call->Args[2] != 0) ? LxCopyToUser(Call->Args[2], Old, sizeof(Old)) : 0;
+    }
+
+    Result = LxSetRealItimer(Call->Process, New, Old);
+    if (Result != 0)
+        return Result;
     if (Call->Args[2] != 0)
         return LxCopyToUser(Call->Args[2], Old, sizeof(Old));
     return 0;
+}
+
+LX_SYSCALL(LxSysAlarm)
+{
+    LX_TIMEVAL New[2], Old[2];
+    LONG64 Result;
+
+    RtlZeroMemory(New, sizeof(New));
+    New[1].Seconds = (ULONG)Call->Args[0];
+    Result = LxSetRealItimer(Call->Process, New, Old);
+    if (Result != 0)
+        return Result;
+    if (((Old[1].Seconds == 0) && (Old[1].Microseconds != 0)) || (Old[1].Microseconds >= 500000))
+        Old[1].Seconds++;
+    return Old[1].Seconds;
 }
 
 #define LX_SIGEV_SIGNAL     0

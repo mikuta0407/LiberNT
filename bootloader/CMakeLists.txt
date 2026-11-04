@@ -91,6 +91,9 @@ if(ARCH STREQUAL "ppc")
         ofw/console.c)
 else()
     list(APPEND BOOTLIB_SOURCE
+        net/udplog.c
+        net/uefinet_hw.c
+        uefi/bootlog.c
         uefi/platform.c
         uefi/serial.c
         uefi/uefi.c)
@@ -106,11 +109,22 @@ elseif(ARCH STREQUAL "arm64")
     list(APPEND BOOTLIB_SOURCE arch/arm64/stubs.c)
 elseif(ARCH STREQUAL "ppc")
     list(APPEND BOOTLIB_SOURCE arch/ppc/stubs.c)
+elseif(ARCH STREQUAL "amd64" OR ARCH STREQUAL "i386")
+    list(APPEND BOOTLIB_SOURCE arch/x86/comport.c)
 endif()
 
 add_library(bootlib ${BOOTLIB_SOURCE})
 target_link_libraries(bootlib fatfs)
+if(ARCH STREQUAL "amd64" OR ARCH STREQUAL "i386")
+    target_link_libraries(bootlib cportlib)
+endif()
 add_dependencies(bootlib bugcodes asm xdk)
+
+add_library(bootntfs lib/ntfsenv.cpp $<TARGET_PROPERTY:ntfslib_new,SOURCES>)
+target_include_directories(bootntfs PRIVATE
+    ${REACTOS_SOURCE_DIR}/sdk/lib/fslib/ntfslib_new/include/public
+    ${REACTOS_SOURCE_DIR}/sdk/lib/fslib/ntfslib_new/include/internal)
+add_dependencies(bootntfs bugcodes xdk psdk)
 
 foreach(_asset font mono icons logo)
     if(_asset STREQUAL "font")
@@ -256,7 +270,6 @@ if(NOT ARCH STREQUAL "ppc")
         net/uefidhcp.c
         net/uefihttp.c
         net/uefinet.c
-        net/uefinet_hw.c
         net/snpnet.c
         uefi/memory.c)
 endif()
@@ -282,13 +295,14 @@ if(WINLOAD_ASM_SOURCE)
         winload/registry.c
         winload/resume.c
         winload/smbios.c
-        winload/startup.c)
+        winload/startup.c
+        winload/httpsync.c)
     if(ARCH STREQUAL "ppc")
         bootloader_ofw_application(winload 0x00400000)
     else()
         bootloader_efi_application(winload EfiEntry)
     endif()
-    target_link_libraries(winload bootwim)
+    target_link_libraries(winload bootwim bootntfs)
     if(MSVC)
         set_property(TARGET winload PROPERTY C_STANDARD 11)
     endif()

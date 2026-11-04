@@ -107,6 +107,18 @@ DxgkEngAdmitRedirectedBltPresent(
 
 NTSTATUS
 NTAPI
+DxgkEngIssueWindowBltTarget(
+    _In_ ULONG_PTR WindowHandle,
+    _Out_ PDXGKRNL_WINDOW_BLT_TARGET Target);
+
+NTSTATUS
+NTAPI
+DxgkEngCancelWindowBltTarget(
+    _In_ ULONG_PTR WindowHandle,
+    _In_ ULONGLONG UpdateId);
+
+NTSTATUS
+NTAPI
 DxgkEngCancelRedirectedBltPresent(
     _In_ const DXGKRNL_REDIRECTED_BLT_PRESENT *Present);
 
@@ -558,6 +570,8 @@ WddmBridgeInit(VOID)
         CddInterface.DispatchNtGdi = DxgkEngDispatchNtGdiDdDDI;
         CddInterface.QueryWindowPresentState = DxgkEngQueryWindowPresentState;
         CddInterface.RefreshComposition = DxgkEngRefreshComposition;
+        CddInterface.IssueWindowBltTarget = DxgkEngIssueWindowBltTarget;
+        CddInterface.CancelWindowBltTarget = DxgkEngCancelWindowBltTarget;
         Status = WddmBridgeSendIoctlToDevice(
                      DeviceObject,
                      IOCTL_DXGKRNL_REGISTER_WIN32K_CDD_INTERFACE,
@@ -676,6 +690,12 @@ WddmBridgeSetCompositorSourceOwner(
     Packet.Height = Claim ? Height : 0;
     return WddmBridgeSendIoctl(IOCTL_RXGK_SETCOMPOSITORSOURCEOWNER,
                                &Packet, sizeof(Packet), NULL, 0);
+}
+
+NTSTATUS
+WddmBridgeRegisterDwmProcess(VOID)
+{
+    return WddmBridgeSendIoctl(IOCTL_RXGK_REGISTERDWMPROCESS, NULL, 0, NULL, 0);
 }
 
 NTSTATUS

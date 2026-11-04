@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_devclass(void);
+extern void func_DevicePowerOnDisable(void);
 extern void func_InterruptAffinityPolicy(void);
 extern void func_SetupDiGetActualModelsSection(void);
 extern void func_InvalidDeviceInfoSet(void);
@@ -10,10 +11,12 @@ extern void func_SetupInstallServicesFromInfSectionEx(void);
 extern void func_SetupCommitFileQueue(void);
 extern void func_SetupDiInstallClassExA(void);
 extern void func_SetupInstallFile(void);
+extern void func_UsbInterfaceIds(void);
 
 const struct test winetest_testlist[] =
 {
     { "devclass", func_devclass },
+    { "DevicePowerOnDisable", func_DevicePowerOnDisable },
     { "InterruptAffinityPolicy", func_InterruptAffinityPolicy },
     { "SetupDiGetActualModelsSection", func_SetupDiGetActualModelsSection },
     { "InvalidDeviceInfoSet", func_InvalidDeviceInfoSet },
@@ -21,5 +24,6 @@ const struct test winetest_testlist[] =
     { "SetupCommitFileQueue", func_SetupCommitFileQueue },
     { "SetupDiInstallClassExA", func_SetupDiInstallClassExA},
     { "SetupInstallFile", func_SetupInstallFile },
+    { "UsbInterfaceIds", func_UsbInterfaceIds },
     { 0, 0 }
 };

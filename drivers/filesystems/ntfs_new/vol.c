@@ -579,6 +579,18 @@ NtfsMissingNameLength(_In_reads_(Length) PCWSTR Name,
     return Length;
 }
 
+static
+USHORT
+NtfsMissingNameLeafStart(_In_reads_(Length) PCWSTR Name,
+                         _In_ USHORT Length)
+{
+    USHORT Index = Length;
+
+    while (Index > 0 && Name[Index - 1] != L'\\')
+        Index--;
+    return Index;
+}
+
 /*
  * Repeated lookups of a name that is not there would otherwise walk the
  * directory index every time, so remember the misses.
@@ -643,6 +655,8 @@ NtfsRecordNameMissing(_In_ PVolumeContextBlock VolCB,
     Hash = NtfsHashName(Name, Length);
     Missing->Hash = Hash;
     Missing->Length = Length;
+    Missing->LeafStart = NtfsMissingNameLeafStart(Name, Length);
+    Missing->LeafHash = NtfsHashName(Name + Missing->LeafStart, Length - Missing->LeafStart);
     RtlCopyMemory(Missing->Name, Name, Length * sizeof(WCHAR));
 
     ExAcquireFastMutex(&VolCB->MissingNameMutex);
@@ -682,27 +696,16 @@ NtfsRecordNameMissing(_In_ PVolumeContextBlock VolCB,
 }
 
 static
-USHORT
-NtfsMissingNameLeafStart(_In_reads_(Length) PCWSTR Name,
-                         _In_ USHORT Length)
-{
-    USHORT Index = Length;
-
-    while (Index > 0 && Name[Index - 1] != L'\\')
-        Index--;
-    return Index;
-}
-
-static
 BOOLEAN
 NtfsMissingNameLeafMatches(_In_ PNtfsMissingName Entry,
+                           _In_ ULONG LeafHash,
                            _In_reads_(LeafLength) PCWSTR Leaf,
                            _In_ USHORT LeafLength)
 {
-    USHORT Start = NtfsMissingNameLeafStart(Entry->Name, Entry->Length);
+    USHORT Start = Entry->LeafStart;
     USHORT Index;
 
-    if (Entry->Length - Start != LeafLength)
+    if (Entry->LeafHash != LeafHash || Entry->Length - Start != LeafLength)
         return FALSE;
 
     for (Index = 0; Index < LeafLength; Index++)
@@ -725,12 +728,14 @@ NtfsForgetMissingName(_In_ PVolumeContextBlock VolCB,
     PLIST_ENTRY Next;
     LIST_ENTRY Stale;
     USHORT LeafStart;
+    ULONG LeafHash;
 
     if (!VolCB || !Name || !Length)
         return;
 
     Length = NtfsMissingNameLength(Name, Length);
     LeafStart = NtfsMissingNameLeafStart(Name, Length);
+    LeafHash = NtfsHashName(Name + LeafStart, Length - LeafStart);
     InitializeListHead(&Stale);
     ExAcquireFastMutex(&VolCB->MissingNameMutex);
     for (Entry = VolCB->MissingNameList.Flink;
@@ -742,6 +747,7 @@ NtfsForgetMissingName(_In_ PVolumeContextBlock VolCB,
 
         Next = Entry->Flink;
         if (NtfsMissingNameLeafMatches(Missing,
+                                       LeafHash,
                                        Name + LeafStart,
                                        Length - LeafStart))
         {
@@ -817,6 +823,26 @@ NtfsCachedRecordMatches(_In_ PNtfsCachedRecord Entry,
     for (Index = 0; Index < Length; Index++)
     {
         if (Entry->Name[Index] != Name[Index])
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static
+BOOLEAN
+NtfsCachedRecordMatchesIgnoreCase(_In_ PNtfsCachedRecord Entry,
+                                  _In_ ULONG Hash,
+                                  _In_reads_(Length) PCWSTR Name,
+                                  _In_ USHORT Length)
+{
+    USHORT Index;
+
+    if (Entry->Hash != Hash || Entry->Length != Length)
+        return FALSE;
+
+    for (Index = 0; Index < Length; Index++)
+    {
+        if (RtlUpcaseUnicodeChar(Entry->Name[Index]) != RtlUpcaseUnicodeChar(Name[Index]))
             return FALSE;
     }
     return TRUE;
@@ -1023,7 +1049,7 @@ NtfsEvictCachedRecord(_In_ PVolumeContextBlock VolCB,
             CONTAINING_RECORD(Entry, NtfsCachedRecord, HashLink);
 
         Next = Entry->Flink;
-        if (NtfsCachedRecordMatches(Candidate, Hash, Name, Length))
+        if (NtfsCachedRecordMatchesIgnoreCase(Candidate, Hash, Name, Length))
         {
             RemoveEntryList(&Candidate->Link);
             RemoveEntryList(&Candidate->HashLink);
@@ -1040,6 +1066,100 @@ NtfsEvictCachedRecord(_In_ PVolumeContextBlock VolCB,
                     RemoveEntryList(&Candidate->IdentityLink);
                 InsertTailList(&DoomedList, &Candidate->Link);
             }
+        }
+    }
+    ExReleaseFastMutex(&VolCB->RecordCacheMutex);
+
+    while (!IsListEmpty(&DoomedList))
+    {
+        PNtfsCachedRecord Doomed = CONTAINING_RECORD(RemoveHeadList(&DoomedList), NtfsCachedRecord, Link);
+
+        if (Doomed->Record)
+            NtfsFileRecordDestroy(Doomed->Record);
+        ExFreePoolWithTag(Doomed, TAG_NTFS);
+    }
+}
+
+PWCHAR
+NtfsCopyCachedRecordName(_In_ PVolumeContextBlock VolCB,
+                         _In_ ULONGLONG FileReference,
+                         _Out_ PUSHORT Length)
+{
+    PLIST_ENTRY Bucket = &VolCB->RecordIdentityHash[(FileReference & 0xFFFFFFFFFFFFULL) & (NTFS_RECORD_CACHE_BUCKETS - 1)];
+    PLIST_ENTRY Entry;
+    PWCHAR Name = NULL;
+
+    *Length = 0;
+    ExAcquireFastMutex(&VolCB->RecordCacheMutex);
+    for (Entry = Bucket->Flink; Entry != Bucket; Entry = Entry->Flink)
+    {
+        PNtfsCachedRecord Found = CONTAINING_RECORD(Entry, NtfsCachedRecord, IdentityLink);
+
+        if (Found->FileReference != FileReference || Found->Evicted)
+            continue;
+        Name = ExAllocatePoolWithTag(PagedPool, (Found->Length + 1) * sizeof(WCHAR), TAG_NTFS);
+        if (Name)
+        {
+            RtlCopyMemory(Name, Found->Name, Found->Length * sizeof(WCHAR));
+            Name[Found->Length] = UNICODE_NULL;
+            *Length = Found->Length;
+        }
+        break;
+    }
+    ExReleaseFastMutex(&VolCB->RecordCacheMutex);
+    return Name;
+}
+
+static
+BOOLEAN
+NtfsCachedRecordIsUnder(_In_ PNtfsCachedRecord Entry,
+                        _In_reads_(Length) PCWSTR Directory,
+                        _In_ USHORT Length)
+{
+    USHORT Index;
+
+    if (Entry->Length <= Length || Entry->Name[Length] != L'\\')
+        return FALSE;
+    for (Index = 0; Index < Length; Index++)
+    {
+        if (RtlUpcaseUnicodeChar(Entry->Name[Index]) != RtlUpcaseUnicodeChar(Directory[Index]))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+VOID
+NtfsEvictCachedRecordsUnder(_In_ PVolumeContextBlock VolCB,
+                            _In_reads_(Length) PCWSTR Directory,
+                            _In_ USHORT Length)
+{
+    PLIST_ENTRY Entry;
+    PLIST_ENTRY Next;
+    LIST_ENTRY DoomedList;
+
+    if (!VolCB || !Directory || !Length)
+        return;
+    while (Length > 1 && Directory[Length - 1] == L'\\')
+        Length--;
+
+    InitializeListHead(&DoomedList);
+    ExAcquireFastMutex(&VolCB->RecordCacheMutex);
+    for (Entry = VolCB->RecordCacheList.Flink; Entry != &VolCB->RecordCacheList; Entry = Next)
+    {
+        PNtfsCachedRecord Candidate = CONTAINING_RECORD(Entry, NtfsCachedRecord, Link);
+
+        Next = Entry->Flink;
+        if (!NtfsCachedRecordIsUnder(Candidate, Directory, Length))
+            continue;
+        RemoveEntryList(&Candidate->Link);
+        RemoveEntryList(&Candidate->HashLink);
+        VolCB->RecordCacheCount--;
+        Candidate->Evicted = TRUE;
+        if (Candidate->InUse == 0)
+        {
+            if (!IsListEmpty(&Candidate->IdentityLink))
+                RemoveEntryList(&Candidate->IdentityLink);
+            InsertTailList(&DoomedList, &Candidate->Link);
         }
     }
     ExReleaseFastMutex(&VolCB->RecordCacheMutex);

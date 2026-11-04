@@ -133,8 +133,7 @@ MiSystemMapFrames(
 
         if (OwnFrames)
         {
-            ULONG CacheFlags = (LeafFlags & MI_LEAF_CACHE_MASK) |
-                               ((Protection & MI_PROT_NOCACHE) ? MI_LEAF_NOCACHE : 0);
+            ULONG CacheFlags = (LeafFlags & MI_LEAF_CACHE_MASK) | MI_PROT_LEAF_CACHE(Protection);
 
             MiPfnInitializePage(&System->Pfn, (ULONG)Frames[i], MiPtSlotAddress(Slot, TableFrame, Va), TableFrame,
                                 MiSoftMake(MiSoftDemandZero, Protection, 0), 0);
@@ -154,12 +153,14 @@ MiSystemMapFrames(
     return STATUS_SUCCESS;
 }
 
+static
 VOID
-MiSystemUnmap(
+MiSystemUnmapScope(
     _Inout_ PMI_SYSTEM System,
     _In_ ULONG64 VirtualAddress,
     _In_ ULONG Count,
-    _In_ BOOLEAN FreeFrames)
+    _In_ BOOLEAN FreeFrames,
+    _In_ BOOLEAN AllProcessors)
 {
     PMI_ADDRESS_SPACE Space = &System->SystemSpace;
     ULONG i;
@@ -192,7 +193,26 @@ MiSystemUnmap(
     }
 
     if (Count != 0)
-        MiArchTlbInvalidate(VirtualAddress, Count, TRUE);
+        MiArchTlbInvalidate(VirtualAddress, Count, AllProcessors);
+}
+
+VOID
+MiSystemUnmap(
+    _Inout_ PMI_SYSTEM System,
+    _In_ ULONG64 VirtualAddress,
+    _In_ ULONG Count,
+    _In_ BOOLEAN FreeFrames)
+{
+    MiSystemUnmapScope(System, VirtualAddress, Count, FreeFrames, TRUE);
+}
+
+VOID
+MiSystemUnmapLocal(
+    _Inout_ PMI_SYSTEM System,
+    _In_ ULONG64 VirtualAddress,
+    _In_ ULONG Count)
+{
+    MiSystemUnmapScope(System, VirtualAddress, Count, FALSE, FALSE);
 }
 
 static
@@ -326,7 +346,7 @@ MiSystemProtect(
     PMI_ADDRESS_SPACE Space = &System->SystemSpace;
     ULONG i;
 
-    if (!MI_PROT_IS_ACCESSIBLE(Protection) && (Protection & MI_PROT_NOACCESS) != MI_PROT_NOACCESS)
+    if (!MI_PROT_IS_ACCESSIBLE(Protection) && !MI_PROT_IS_NOACCESS(Protection))
         return STATUS_INVALID_PAGE_PROTECTION;
 
     for (i = 0; i < Count; i++)
@@ -353,7 +373,7 @@ MiSystemProtect(
             return STATUS_NOT_COMMITTED;
         }
 
-        if ((Protection & MI_PROT_NOACCESS) == MI_PROT_NOACCESS)
+        if (MI_PROT_IS_NOACCESS(Protection))
         {
             MiPtWrite(Space, Va, Slot, TableFrame,
                       MiSoftMake(MiSoftResident, MI_PROT_NOACCESS, Frame) |

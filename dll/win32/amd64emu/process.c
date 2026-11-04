@@ -6,6 +6,7 @@
  */
 
 #include "amd64emu.h"
+#include <reactos/wow64shared.h>
 
 #define EMU_PROCESS_UNINITIALIZED 0
 #define EMU_PROCESS_INITIALIZING  1
@@ -63,6 +64,7 @@ EmuInitializeProcess(
     static const UNICODE_STRING NativeName = RTL_CONSTANT_STRING(L"ntdll.dll");
     WCHAR NtdllBuffer[MAX_PATH];
     UNICODE_STRING NtdllPath;
+    PSYSTEM_DLL_INIT_BLOCK InitBlock;
     PVOID NativeNtdll;
     NTSTATUS Status;
 
@@ -90,12 +92,19 @@ EmuInitializeProcess(
     Status = EmuCoreInitialize();
     if (!NT_SUCCESS(Status)) return Status;
 
-    RtlInitEmptyUnicodeString(&NtdllPath, NtdllBuffer, sizeof(NtdllBuffer));
-    Status = RtlAppendUnicodeStringToString(&NtdllPath, &EmuProcess.GuestDirectory);
-    if (NT_SUCCESS(Status)) Status = RtlAppendUnicodeToString(&NtdllPath, L"ntdll.dll");
-    if (!NT_SUCCESS(Status)) return Status;
-
-    Status = EmuMapGuestImage(&NtdllPath, &EmuProcess.GuestNtdll);
+    InitBlock = RtlFindExportedRoutineByName(NativeNtdll, "LdrSystemDllInitBlock");
+    if (InitBlock && InitBlock->ntdll_handle)
+    {
+        EmuProcess.GuestNtdll = (PVOID)(ULONG_PTR)InitBlock->ntdll_handle;
+        Status = EmuAdoptGuestImage(EmuProcess.GuestNtdll);
+    }
+    else
+    {
+        RtlInitEmptyUnicodeString(&NtdllPath, NtdllBuffer, sizeof(NtdllBuffer));
+        Status = RtlAppendUnicodeStringToString(&NtdllPath, &EmuProcess.GuestDirectory);
+        if (NT_SUCCESS(Status)) Status = RtlAppendUnicodeToString(&NtdllPath, L"ntdll.dll");
+        if (NT_SUCCESS(Status)) Status = EmuMapGuestImage(&NtdllPath, &EmuProcess.GuestNtdll);
+    }
     if (!NT_SUCCESS(Status)) return Status;
 
     Status = EmuGetGuestExport("LdrInitializeThunk", &EmuProcess.LdrInitializeThunk);
@@ -137,6 +146,29 @@ EmuEnsureProcess(
     return Status;
 }
 
+VOID
+EmuBuildNativeStartContext(
+    _In_ const CONTEXT *Native,
+    _Out_ AMD64_CONTEXT *Start)
+{
+    RtlZeroMemory(Start, sizeof(*Start));
+    Start->Rcx = Native->A0;
+    Start->Rdx = Native->A1;
+    Start->Rsp = (Native->Sp & ~(ULONG64)15) - 5 * sizeof(ULONG64);
+    Start->Rip = Native->Pc == EmuProcess.NativeRtlUserThreadStart ? EmuProcess.RtlUserThreadStart : Native->Pc;
+    Start->MxCsr = 0x1F80;
+    Start->FltSave.ControlWord = 0x27F;
+    Start->FltSave.MxCsr = 0x1F80;
+    Start->EFlags = 0x202;
+    Start->ContextFlags = CONTEXT_AMD64_FULL | CONTEXT_AMD64_SEGMENTS;
+    Start->SegCs = EMU_SEG_CODE;
+    Start->SegDs = EMU_SEG_DATA;
+    Start->SegEs = EMU_SEG_DATA;
+    Start->SegSs = EMU_SEG_DATA;
+    Start->SegGs = EMU_SEG_DATA;
+    Start->SegFs = EMU_SEG_TEB;
+}
+
 static
 VOID
 EmuBuildStartContext(
@@ -146,24 +178,15 @@ EmuBuildStartContext(
     PCONTEXT Native = &Host->StartContext;
     PEMU_THREAD_START Record;
 
-    if (Native->Pc == (ULONG_PTR)EmuGuestThreadEntry)
+    if (Native->Pc != (ULONG_PTR)EmuGuestThreadEntry)
     {
-        Record = (PEMU_THREAD_START)Native->A0;
-        *Start = Record->Context;
-        RtlFreeHeap(RtlGetProcessHeap(), 0, Record);
+        EmuBuildNativeStartContext(Native, Start);
+        return;
     }
-    else
-    {
-        RtlZeroMemory(Start, sizeof(*Start));
-        Start->Rcx = Native->A0;
-        Start->Rdx = Native->A1;
-        Start->Rsp = (Native->Sp & ~(ULONG64)15) - 5 * sizeof(ULONG64);
-        Start->Rip = Native->Pc == EmuProcess.NativeRtlUserThreadStart ? EmuProcess.RtlUserThreadStart : Native->Pc;
-        Start->MxCsr = 0x1F80;
-        Start->FltSave.ControlWord = 0x27F;
-        Start->FltSave.MxCsr = 0x1F80;
-        Start->EFlags = 0x202;
-    }
+
+    Record = (PEMU_THREAD_START)Native->A0;
+    *Start = Record->Context;
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Record);
 
     Start->ContextFlags = CONTEXT_AMD64_FULL | CONTEXT_AMD64_SEGMENTS;
     Start->SegCs = EMU_SEG_CODE;

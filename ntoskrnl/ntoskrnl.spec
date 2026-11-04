@@ -1913,7 +1913,7 @@
 @ stdcall -arch=arm64 KiDispatchInterrupt()
 @ stdcall -arch=win64 MmCopyVirtualMemory()
 @ stdcall -arch=arm64 MmLoadSystemImage()
-@ stdcall -arch=win64 MmMapViewInSystemSpaceEx()
+@ stdcall MmMapViewInSystemSpaceEx(ptr ptr ptr ptr long)
 @ stdcall -arch=arm64 MmUnloadSystemImage()
 @ stdcall -arch=win64 NtEnumerateSystemEnvironmentValuesEx()
 @ stdcall -arch=win64 NtReadFileScatter()
@@ -2418,6 +2418,7 @@
 @ stdcall InbvSetVirtualFrameBuffer(ptr)
 @ stdcall InbvQueryBootScreen(ptr long ptr ptr)
 @ stdcall InbvDiscardBootScreen()
+@ stdcall InbvCopyBootScreen(ptr long long long)
 @ stub -arch=win64 InterlockedPushListSList
 @ stub -arch=win64 IoAcquireKsrPersistentMemory
 @ stub -arch=win64 IoAcquireKsrPersistentMemoryEx
@@ -2635,7 +2636,7 @@
 @ stdcall -arch=win64 KeQueryActiveProcessorAffinity(ptr)
 @ stdcall -arch=win64 KeQueryActiveProcessorAffinity2(ptr ptr)
 @ stdcall -arch=win64 KeQueryAuxiliaryCounterFrequency(ptr)
-@ stdcall -arch=win64 KeQueryDpcWatchdogInformation(ptr)
+@ stdcall KeQueryDpcWatchdogInformation(ptr)
 @ stdcall -arch=win64 KeQueryEffectivePriorityThread(ptr)
 @ stdcall KeQueryGroupAffinity(long)
 @ stdcall KeQueryGroupAffinityEx(ptr long)
@@ -3005,7 +3006,7 @@
 @ stdcall RtlAvlRemoveNode(ptr ptr)
 @ stdcall RtlCapabilityCheck(ptr ptr ptr)
 @ stdcall RtlCapabilityCheckForSingleSessionSku(ptr ptr ptr)
-@ stub -arch=win64 RtlCheckPortableOperatingSystem
+@ stdcall RtlCheckPortableOperatingSystem(ptr)
 @ stub -arch=win64 RtlCheckSystemBootStatusIntegrity
 @ stub -arch=win64 RtlCheckTokenCapability
 @ stdcall RtlCheckTokenMembership(ptr ptr ptr)
@@ -3185,7 +3186,7 @@
 @ stub -arch=win64 RtlSetBitsEx
 @ stdcall RtlSetConsoleSessionForegroundProcessId(int64)
 @ stub -arch=win64 RtlSetDynamicTimeZoneInformation
-@ stub -arch=win64 RtlSetPortableOperatingSystem
+@ stdcall RtlSetPortableOperatingSystem(long)
 @ stub -arch=win64 RtlSetProcessPlaceholderCompatibilityMode
 @ stub -arch=win64 RtlSetSystemBootStatus
 @ stub -arch=win64 RtlSetSystemBootStatusEx

@@ -29,6 +29,7 @@ ULONG PsRawPrioritySeparation;
 ULONG PsPrioritySeparation;
 CHAR PspForegroundQuantum[3];
 volatile LONG64 PspProcessSequenceNumber;
+static const PCWSTR PspEmulatedSystemDll = KI_EMULATED_USER_SYSTEM_DLL;
 
 /* Fixed quantum table */
 CHAR PspFixedQuantums[6] =
@@ -1807,11 +1808,45 @@ PspAllocateUserStack(IN HANDLE ProcessHandle,
     return STATUS_SUCCESS;
 }
 
-#ifdef WOW64_SUPPORTED
 static NTSTATUS
-PspMapWow64SystemDll(IN HANDLE ProcessHandle)
+PspFindWow64SystemDllExport(IN HANDLE ProcessHandle,
+                            IN PVOID ImageBase,
+                            IN PCSTR Name,
+                            OUT PULONG Address)
 {
-    UNICODE_STRING Path = RTL_CONSTANT_STRING(L"\\SystemRoot\\SysWOW64\\ntdll.dll");
+    PEPROCESS Process;
+    KAPC_STATE ApcState;
+    PVOID Function = NULL;
+    NTSTATUS Status;
+
+    Status = ObReferenceObjectByHandle(ProcessHandle, PROCESS_VM_READ, PsProcessType, KernelMode, (PVOID *)&Process, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    KeStackAttachProcess(&Process->Pcb, &ApcState);
+    _SEH2_TRY
+    {
+        Function = RtlFindExportedRoutineByName(ImageBase, Name);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Function = NULL;
+    }
+    _SEH2_END;
+    KeUnstackDetachProcess(&ApcState);
+    ObDereferenceObject(Process);
+
+    if (!Function) return STATUS_ENTRYPOINT_NOT_FOUND;
+    *Address = PtrToUlong(Function);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+PspMapGuestSystemDll(IN HANDLE ProcessHandle,
+                     IN PCWSTR DllPath,
+                     IN ULONG_PTR ZeroBits,
+                     OUT PULONG RtlUserThreadStart OPTIONAL)
+{
+    UNICODE_STRING Path;
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoStatusBlock;
     HANDLE FileHandle, SectionHandle;
@@ -1822,6 +1857,7 @@ PspMapWow64SystemDll(IN HANDLE ProcessHandle)
 
     if (!PspSystemDllInitBlock) return STATUS_NOT_SUPPORTED;
 
+    RtlInitUnicodeString(&Path, DllPath);
     InitializeObjectAttributes(&ObjectAttributes, &Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
     Status = ZwOpenFile(&FileHandle, FILE_READ_ACCESS, &ObjectAttributes, &IoStatusBlock, FILE_SHARE_READ | FILE_SHARE_DELETE, 0);
     if (!NT_SUCCESS(Status)) return Status;
@@ -1830,7 +1866,7 @@ PspMapWow64SystemDll(IN HANDLE ProcessHandle)
     ZwClose(FileHandle);
     if (!NT_SUCCESS(Status)) return Status;
 
-    Status = ZwMapViewOfSection(SectionHandle, ProcessHandle, &ViewBase, MAXLONG, 0, NULL, &ViewSize, ViewShare, 0, PAGE_READWRITE);
+    Status = ZwMapViewOfSection(SectionHandle, ProcessHandle, &ViewBase, ZeroBits, 0, NULL, &ViewSize, ViewShare, 0, PAGE_READWRITE);
     ZwClose(SectionHandle);
     if (!NT_SUCCESS(Status)) return Status;
 
@@ -1840,10 +1876,19 @@ PspMapWow64SystemDll(IN HANDLE ProcessHandle)
                                   &NtdllBase,
                                   sizeof(NtdllBase),
                                   NULL);
-    if (!NT_SUCCESS(Status)) ZwUnmapViewOfSection(ProcessHandle, ViewBase);
-    return Status;
+    if (!NT_SUCCESS(Status))
+    {
+        ZwUnmapViewOfSection(ProcessHandle, ViewBase);
+        return Status;
+    }
+
+    if (!RtlUserThreadStart)
+        return STATUS_SUCCESS;
+
+    return PspFindWow64SystemDllExport(ProcessHandle, ViewBase, "RtlUserThreadStart", RtlUserThreadStart);
 }
 
+#ifdef WOW64_SUPPORTED
 static NTSTATUS
 PspAppendWow64String(IN PUNICODE_STRING Source,
                      OUT PWOW64_UNICODE_STRING Destination,
@@ -2059,7 +2104,7 @@ PspPrepareWow64Thread(IN HANDLE ProcessHandle,
     CpuInit.Context = *Wow64Context;
     CpuInit.Context.ContextFlags = WOW64_CONTEXT_FULL;
     PspInitializeWow64FloatState(&CpuInit.Context);
-    CpuInit.Context.EFlags = (Wow64Context->EFlags & 0x3000) | EFLAGS_INTERRUPT_MASK;
+    CpuInit.Context.EFlags = EFLAGS_INTERRUPT_MASK;
     CpuInit.Context.SegCs = KGDT64_R3_CMCODE | RPL_MASK;
     CpuInit.Context.SegDs = KGDT64_R3_DATA | RPL_MASK;
     CpuInit.Context.SegEs = KGDT64_R3_DATA | RPL_MASK;
@@ -3481,8 +3526,12 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
         Status = PspCreateWow64ProcessParameters(hProcess, ProcessParameters, Wow64Peb, &Wow64ProcessParameters);
         if (!NT_SUCCESS(Status)) goto Cleanup;
     }
-    if (Wow64Peb) PspMapWow64SystemDll(hProcess);
 #endif
+    if (PspEmulatedSystemDll && ImageInformation.Machine == KI_EMULATED_USER_MACHINE &&
+        !ImageInformation.ComPlusNativeReady)
+    {
+        PspMapGuestSystemDll(hProcess, PspEmulatedSystemDll, 0, NULL);
+    }
 
     /*
      * Step 7: Create the initial thread.
@@ -3502,8 +3551,11 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
     {
         WOW64_CPU_INIT CpuInit;
         ULONG_PTR CpuAddress;
+        ULONG ThreadStart = 0;
 
-        Status = PspAllocateUserStack(hProcess, MM_SYSTEM_RANGE_START_WOW64 - 1, ImageInformation.MaximumStackSize, ImageInformation.CommittedStackSize, PAGE_SIZE, &Wow64InitialTeb);
+        Status = PspMapGuestSystemDll(hProcess, L"\\SystemRoot\\SysWOW64\\ntdll.dll", MAXLONG, &ThreadStart);
+        if (NT_SUCCESS(Status))
+            Status = PspAllocateUserStack(hProcess, MM_SYSTEM_RANGE_START_WOW64 - 1, ImageInformation.MaximumStackSize, ImageInformation.CommittedStackSize, PAGE_SIZE, &Wow64InitialTeb);
         if (!NT_SUCCESS(Status)) goto Cleanup;
         Status = PspAllocateUserStack(hProcess, MM_SYSTEM_RANGE_START_WOW64 - 1, 0x40000, 0x40000, 0, &InitialTeb);
         if (!NT_SUCCESS(Status)) goto Cleanup;
@@ -3512,10 +3564,10 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
         CpuInit.Cpu.Machine = IMAGE_FILE_MACHINE_I386;
         CpuInit.Context.ContextFlags = WOW64_CONTEXT_FULL;
         PspInitializeWow64FloatState(&CpuInit.Context);
-        CpuInit.Context.Eip = PtrToUlong(ImageInformation.TransferAddress);
+        CpuInit.Context.Eip = ThreadStart;
         CpuInit.Context.Eax = PtrToUlong(ImageInformation.TransferAddress);
         CpuInit.Context.Ebx = PtrToUlong(Wow64Peb);
-        CpuInit.Context.Esp = PtrToUlong(Wow64InitialTeb.StackBase);
+        CpuInit.Context.Esp = PtrToUlong(Wow64InitialTeb.StackBase) - 3 * sizeof(ULONG);
         CpuInit.Context.EFlags = EFLAGS_INTERRUPT_MASK;
         CpuInit.Context.SegCs = KGDT64_R3_CMCODE | RPL_MASK;
         CpuInit.Context.SegDs = KGDT64_R3_DATA | RPL_MASK;
@@ -3592,9 +3644,11 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
 #elif defined(_M_RISCV64)
     /* Native NT startup state; the thread initializer installs tp from the
      * allocated TEB and supplies supervisor-owned user-return status bits. */
-    ThreadContext.Pc = (ULONG64)ImageInformation.TransferAddress;
-    ThreadContext.Sp = (ULONG64)InitialTeb.StackBase & ~15ULL;
-    ThreadContext.A0 = (ULONG64)ProcessBasicInfo.PebBaseAddress;
+    PsArchInitializeUserThreadContext(&ThreadContext,
+                                      PspRtlUserThreadStart,
+                                      ImageInformation.TransferAddress,
+                                      ProcessBasicInfo.PebBaseAddress,
+                                      InitialTeb.StackBase);
 #elif defined(_M_PPC)
     /* The image entry is a function descriptor {code, TOC} in the new
      * process. Leave a 64-byte frame header below the stack base. */

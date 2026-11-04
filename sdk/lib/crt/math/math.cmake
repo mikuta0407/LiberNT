@@ -101,13 +101,22 @@ if(ARCH STREQUAL "i386")
     list(APPEND CRT_MATH_ASM_SOURCE
         math/i386/ceilf.S
         math/i386/floorf.S
-        math/i386/exp_asm.s
         math/i386/fmod_asm.s
         math/i386/fmodf_asm.s
     )
     list(APPEND CRT_MATH_SOURCE
         math/_hypotf.c
+        math/i386/libm_crt.c
+        math/ldexp.c
+        math/logb.c
     )
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set_source_files_properties(
+            math/i386/libm_crt.c math/ldexp.c
+            math/ieee754/j0_y0.c math/ieee754/j1_y1.c math/ieee754/jn_yn.c
+            math/j0_y0.c math/j1_y1.c math/jn_yn.c
+            PROPERTIES COMPILE_OPTIONS "-msse2;-mfpmath=sse")
+    endif()
 elseif(ARCH STREQUAL "amd64")
     list(APPEND LIBCNTPR_MATH_SOURCE
         math/amd64/_set_statfp.c
@@ -347,6 +356,22 @@ list(APPEND CRT_MATH_SOURCE
 list(APPEND CRT_MATH_ASM_SOURCE
     ${LIBCNTPR_MATH_ASM_SOURCE}
 )
+
+if(ARCH STREQUAL "i386")
+    list(REMOVE_ITEM CRT_MATH_SOURCE
+        math/acos.c
+        math/i386/ldexp.c
+    )
+    list(REMOVE_ITEM CRT_MATH_ASM_SOURCE
+        math/i386/cos_asm.s
+        math/i386/log_asm.s
+        math/i386/log10_asm.s
+        math/i386/pow_asm.s
+        math/i386/sin_asm.s
+        math/i386/sqrt_asm.s
+        math/i386/tan_asm.s
+    )
+endif()
 
 if(ARCH STREQUAL "i386")
     list(APPEND ATAN2_ASM_SOURCE math/i386/atan2_asm.s)

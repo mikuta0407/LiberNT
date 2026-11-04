@@ -15,6 +15,7 @@
 #include "compat_undoc.h"
 
 #define MAX_LAYER_LENGTH            256
+#define SDBQUERY_EXE_MATCHED        0x100
 #define GPLK_USER                   1
 #define GPLK_MACHINE                2
 
@@ -289,6 +290,7 @@ static void SdbpAddExeMatch(HSDB hsdb, PDB pdb, TAGID tagExe, PSDBQUERYRESULT re
 {
     size_t n;
     TAGREF tr;
+    TAGID apphelp;
 
     if (!SdbTagIDToTagRef(hsdb, pdb, tagExe, &tr))
         return;
@@ -304,6 +306,18 @@ static void SdbpAddExeMatch(HSDB hsdb, PDB pdb, TAGID tagExe, PSDBQUERYRESULT re
 
     result->atrExes[n] = tr;
     result->dwExeCount++;
+    result->dwFlags |= SDBQUERY_EXE_MATCHED | SHIMREG_HAS_ENVIRONMENT;
+
+    apphelp = SdbFindFirstTag(pdb, tagExe, TAG_APPHELP);
+    if (apphelp != TAGID_NULL)
+    {
+        TAGID severity = SdbFindFirstTag(pdb, apphelp, TAG_PROBLEMSEVERITY);
+
+        /* TODO: flags for severities other than 1 and 2 */
+        result->adwExeFlags[n] = SdbReadDWORDTag(pdb, severity, 0) == 2 ? 0x3000 : 0x1000;
+        result->trApphelp = tr;
+        result->dwFlags |= SHIMREG_DISABLE_LAYER;
+    }
 
     SdbpAddExeLayers(hsdb, pdb, tagExe, result);
 
@@ -358,6 +372,7 @@ static BOOL SdbpPropagateEnvLayers(HSDB hsdb, LPWSTR Environment, PSDBQUERYRESUL
     if (!NT_SUCCESS(Status))
         return FALSE;
 
+    Result->dwFlags |= SHIMREG_DISABLE_LAYER;
     return SdbpAddLayerMatches(hsdb, Buffer, EnvValue.Length, Result) > 0;
 }
 
@@ -607,9 +622,14 @@ HRESULT WINAPI SdbGetAppPatchDir(HSDB hsdb, LPWSTR path, DWORD size)
     static WCHAR* default_dir = NULL;
     static CONST WCHAR szAppPatch[] = {'\\','A','p','p','P','a','t','c','h',0};
 
+    if (!path)
+        return S_OK;
+
+    if (!size)
+        return S_FALSE;
+
     /* In case function fails, path holds empty string */
-    if (size > 0)
-        *path = 0;
+    *path = 0;
 
     if (!default_dir)
     {
@@ -641,7 +661,9 @@ HRESULT WINAPI SdbGetAppPatchDir(HSDB hsdb, LPWSTR path, DWORD size)
 
     if (!hsdb)
     {
-        return StringCchCopyW(path, size, default_dir);
+        HRESULT hr = StringCchCopyW(path, size, default_dir);
+
+        return hr == STRSAFE_E_INSUFFICIENT_BUFFER ? S_OK : hr;
     }
     else
     {
@@ -743,7 +765,14 @@ BOOL WINAPI SdbPackAppCompatData(HSDB hsdb, PSDBQUERYRESULT pQueryResult, PVOID*
     pData->dwMagic = SHIMDATA_MAGIC;
     pData->Query = *pQueryResult;
     pData->dwRosProcessCompatVersion = 0;
-    pData->szLayer[0] = UNICODE_NULL;   /* TODO */
+    {
+        static const UNICODE_STRING EnvKey = RTL_CONSTANT_STRING(L"__COMPAT_LAYER");
+        UNICODE_STRING EnvValue;
+
+        RtlInitEmptyUnicodeString(&EnvValue, pData->szLayer, sizeof(pData->szLayer) - sizeof(WCHAR));
+        if (!NT_SUCCESS(RtlQueryEnvironmentVariable_U(NULL, &EnvKey, &EnvValue)))
+            pData->szLayer[0] = UNICODE_NULL;
+    }
 
     SHIM_INFO("\ndwFlags    0x%x\ndwMagic    0x%x\ntrExe      0x%x\ntrLayer    0x%x\n",
               pData->Query.dwFlags, pData->dwMagic, pData->Query.atrExes[0], pData->Query.atrLayers[0]);

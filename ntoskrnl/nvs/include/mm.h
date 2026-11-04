@@ -120,6 +120,7 @@ typedef struct _MI_SYSTEM
     PVOID Context;
     BOOLEAN (*ChargeOwnerCommit)(_In_ PVOID Owner, _In_ LONG64 Pages);
     VOID (*ReturnOwnerCommit)(_In_ PVOID Owner, _In_ LONG64 Pages);
+    ULONG64 (*OwnerProcessors)(_In_ PVOID Owner);
     BOOLEAN (*ExpandCommit)(_Inout_ struct _MI_SYSTEM *System, _In_ LONG64 Pages, _In_ LONG64 Limit,
                             _In_ BOOLEAN Wait);
     VOID (*UnusedSegmentsExceeded)(_Inout_ struct _MI_SYSTEM *System);
@@ -178,6 +179,7 @@ VOID MiPtUnpinRange(_Inout_ PMI_ADDRESS_SPACE Space, _In_ ULONG64 VirtualAddress
 #define MI_MEM_PHYSICAL             0x00400000
 #define MI_MEM_IMAGE                0x01000000
 #define MI_MEM_LARGE_PAGES          0x20000000
+#define MI_MEM_PAGE_GRANULAR        0x40000000
 #define MI_MEM_ROTATE               0x00800000
 #define MI_MEM_RESERVE_PLACEHOLDER  0x00080000
 #define MI_MEM_REPLACE_PLACEHOLDER  0x02000000
@@ -642,3 +644,4 @@ NTSTATUS MiPageFileExtend(_Inout_ PMI_PAGEFILE PageFile, _In_ ULONG64 SlotCount)
 BOOLEAN MiChargeSystemCommit(_Inout_ PMI_SYSTEM System, _In_ LONG64 Pages, _In_ BOOLEAN Wait);
 BOOLEAN MiChargeCommit(_Inout_ PMI_ADDRESS_SPACE Space, _In_ LONG64 Pages);
 VOID MiReturnCommit(_Inout_ PMI_ADDRESS_SPACE Space, _In_ LONG64 Pages);
+VOID MiTlbInvalidateSpace(_In_ PMI_ADDRESS_SPACE Space, _In_ ULONG64 VirtualAddress, _In_ ULONG64 PageCount);

@@ -24,10 +24,10 @@ MiProtectionIsValid(
     if (Protection & ~MI_PROT_MASK)
         return FALSE;
 
-    if ((Protection & MI_PROT_NOACCESS) == MI_PROT_NOACCESS)
-        return (Access == MI_PROT_NONE);
+    if (Access == MI_PROT_NONE)
+        return MI_PROT_IS_NOACCESS(Protection);
 
-    return (Access != MI_PROT_NONE);
+    return TRUE;
 }
 
 static
@@ -301,19 +301,19 @@ MiSetPrivatePageProtectionAt(
         if (!(MI_PFN_FLAGS(Entry) & MI_PFN_FLAG_PROTOTYPE))
             Entry->OriginalPte = MiSoftWithProtection(Entry->OriginalPte, Protection);
 
-        if (!MI_PROT_IS_ACCESSIBLE(Protection) || (Protection & MI_PROT_GUARD))
+        if (!MI_PROT_IS_ACCESSIBLE(Protection) || MI_PROT_IS_GUARD(Protection))
         {
             MI_PTE Transition = MiSoftMake(MiSoftTransition, Protection, Frame);
 
             MiPtWrite(Space, VirtualAddress, Slot, TableFrame, Transition);
-            MiArchTlbInvalidate(VirtualAddress, 1, TRUE);
+            MiTlbInvalidateSpace(Space, VirtualAddress, 1);
             MiPfnShareDecrement(&System->Pfn, Frame, FALSE);
             MI_ATOMIC_ADD64(&Space->ResidentPages, -1);
             return STATUS_SUCCESS;
         }
 
         MiPtWrite(Space, VirtualAddress, Slot, TableFrame, MiArchPteMakeLeaf(Frame, Protection, Flags));
-        MiArchTlbInvalidate(VirtualAddress, 1, TRUE);
+        MiTlbInvalidateSpace(Space, VirtualAddress, 1);
         return STATUS_SUCCESS;
     }
 
@@ -849,10 +849,8 @@ MiAllocateVirtualMemoryBounded(
 
     if (Protection != MI_PROT_NOACCESS)
     {
-        Protection &= ~MI_PROT_NOCACHE;
-        if (MI_PROT_IS_ACCESSIBLE(Vad->Protection))
-            Protection |= Vad->Protection & MI_PROT_NOCACHE;
-        if (!MiProtectionIsValid(Protection))
+        if (!MiProtApplyCache(&Protection, MI_PROT_IS_ACCESSIBLE(Vad->Protection) ? MI_PROT_CACHE(Vad->Protection) : 0) ||
+            !MiProtectionIsValid(Protection))
         {
             MI_RW_RELEASE_EXCLUSIVE(&Space->Lock);
             return STATUS_INVALID_PAGE_PROTECTION;
@@ -1313,10 +1311,9 @@ MiProtectVirtualMemoryEx(
     {
         if (NewProtection != MI_PROT_NOACCESS)
         {
-            NewProtection &= ~MI_PROT_NOCACHE;
-            if (MI_PROT_IS_ACCESSIBLE(Vad->Protection))
-                NewProtection |= Vad->Protection & MI_PROT_NOCACHE;
-            if (!MiProtectionIsValid(NewProtection))
+            if (!MiProtApplyCache(&NewProtection,
+                                  MI_PROT_IS_ACCESSIBLE(Vad->Protection) ? MI_PROT_CACHE(Vad->Protection) : 0) ||
+                !MiProtectionIsValid(NewProtection))
             {
                 MI_RW_RELEASE_EXCLUSIVE(&Space->Lock);
                 return STATUS_INVALID_PAGE_PROTECTION;
@@ -1358,7 +1355,12 @@ MiQueryVirtualMemory(
     ULONG64 Start = MI_PAGE_ALIGN_DOWN(Address);
     BOOLEAN Committed;
     BOOLEAN Uniform;
+    BOOLEAN HaveRun = FALSE;
+    BOOLEAN Locked = FALSE;
+    KIRQL OldIrql = 0;
+    ULONG LockedFrame = 0;
     ULONG Protection;
+    MI_PTE Run = 0;
     PMI_VAD Vad;
     ULONG64 Va;
 
@@ -1413,16 +1415,46 @@ MiQueryVirtualMemory(
         ULONG TableFrame = 0;
         PMI_PTE Slot = MiPtLookup(Space, Va, &TableFrame);
         BOOLEAN Clones;
+        BOOLEAN Memo;
 
         if (TableEnd > MI_VAD_END(Vad))
             TableEnd = MI_VAD_END(Vad);
         Clones = MiCloneIntersects(Space, Va, TableEnd);
+        Memo = (BOOLEAN)(Vad->Type == MiVadPrivate && !Clones && Slot != NULL);
+        Locked = (BOOLEAN)(Memo && !MI_VAD_IS_DIRECT(Vad));
+        if (Locked)
+        {
+            LockedFrame = TableFrame;
+            OldIrql = MiPfnLock(&Space->System->Pfn, LockedFrame);
+        }
         for (; Va < TableEnd; Va += PAGE_SIZE)
         {
             BOOLEAN NextCommitted;
             ULONG NextProtection;
+            MI_PTE Pte = Memo ? MiArchPteRead(Slot) : 0;
 
-            MiPageStatusAt(Space, Vad, Va, Slot, TableFrame, TRUE, Clones, &NextCommitted, &NextProtection);
+            if (Memo && !MiArchPteIsValid(Pte))
+            {
+                if (HaveRun && Pte == Run)
+                {
+                    NextCommitted = Committed;
+                    NextProtection = Protection;
+                }
+                else
+                {
+                    MiPageStatusLocked(Space, Vad, Va, Pte, FALSE, &NextCommitted, &NextProtection);
+                    Run = Pte;
+                    HaveRun = TRUE;
+                }
+            }
+            else if (Locked)
+            {
+                MiPageStatusLocked(Space, Vad, Va, Pte, FALSE, &NextCommitted, &NextProtection);
+            }
+            else
+            {
+                MiPageStatusAt(Space, Vad, Va, Slot, TableFrame, TRUE, Clones, &NextCommitted, &NextProtection);
+            }
             if (NextCommitted != Committed || NextProtection != Protection)
                 goto Done;
             if (Slot != NULL)
@@ -1435,9 +1467,16 @@ MiQueryVirtualMemory(
                 break;
             }
         }
+        if (Locked)
+        {
+            MiPfnUnlock(&Space->System->Pfn, LockedFrame, OldIrql);
+            Locked = FALSE;
+        }
     }
 
 Done:
+    if (Locked)
+        MiPfnUnlock(&Space->System->Pfn, LockedFrame, OldIrql);
     Information->RegionSize = Va - Start;
     MI_RW_RELEASE_SHARED(&Space->Lock);
     return STATUS_SUCCESS;
@@ -1662,7 +1701,7 @@ MiUnmapFramesUserLocked(
             MiPtWrite(Space, Va, Slot, TableFrame, 0);
     }
 
-    MiArchTlbInvalidate(MI_VAD_START(Vad), (MI_VAD_END(Vad) - MI_VAD_START(Vad)) >> PAGE_SHIFT, TRUE);
+    MiTlbInvalidateSpace(Space, MI_VAD_START(Vad), (MI_VAD_END(Vad) - MI_VAD_START(Vad)) >> PAGE_SHIFT);
     MiVadRemove(&Space->VadRoot, &Vad->Node);
     MI_FREE(Vad);
 }

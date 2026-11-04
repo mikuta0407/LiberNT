@@ -167,6 +167,31 @@ EmuCoreInvalidate(
     if (Size) Felix86NtInvalidate((ULONG64)Base, (ULONG64)Base + Size);
 }
 
+ULONG
+EmuCoreForgetCode(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size)
+{
+    return Felix86NtForgetCode((ULONG64)Base, Size);
+}
+
+VOID
+EmuCoreProtectCode(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size,
+    _In_ ULONG NewProtect)
+{
+    Felix86NtCacheProtect((ULONG64)Base, Size, NewProtect);
+}
+
+VOID
+EmuCoreExcludeCode(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size)
+{
+    Felix86NtExcludeCode((ULONG64)Base, Size);
+}
+
 VOID
 EmuCoreGetProcessor(
     _Out_ PUSHORT Level,

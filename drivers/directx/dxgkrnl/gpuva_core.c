@@ -386,4 +386,96 @@ DxgkGpuVaCorePteEqual(
            Left->LargePage == Right->LargePage;
 }
 
+DXGK_GPUVA_64KB_ENTRIES
+DxgkGpuVaCore64KBEntries(
+    _In_ BOOLEAN DualPteSupported,
+    _In_ ULONG PageTableLevel,
+    _In_ BOOLEAN Repeat)
+{
+    if (!DualPteSupported)
+        return DxgkGpuVa64KBEntriesNone;
+    /* Windows VidMm: entry-less updates repeat a zero PTE in both arrays, level-1 updates pass the 64 KB half. */
+    if (Repeat)
+        return DxgkGpuVa64KBEntriesZeroPte;
+    return PageTableLevel == 1 ? DxgkGpuVa64KBEntriesTableHalf : DxgkGpuVa64KBEntriesNone;
+}
+
+static BOOLEAN
+GpuVaCoreEntryIsZero(
+    _In_ const ULONGLONG *Entries,
+    _In_opt_ const ULONGLONG *Entries64KB,
+    _In_ ULONG Index)
+{
+    if (Entries[Index * 2] != 0 || Entries[Index * 2 + 1] != 0)
+        return FALSE;
+    return Entries64KB == NULL || (Entries64KB[Index * 2] == 0 && Entries64KB[Index * 2 + 1] == 0);
+}
+
+/* A table that was just zero-filled is written once per entry: only its non-zero runs follow the fill. */
+BOOLEAN
+DxgkGpuVaCoreNextWriteRun(
+    _In_reads_(Count * 2) const ULONGLONG *Entries,
+    _In_reads_opt_(Count * 2) const ULONGLONG *Entries64KB,
+    _In_ ULONG Count,
+    _In_ BOOLEAN ZeroFilled,
+    _Inout_ PULONG Cursor,
+    _Out_ PULONG RunLength)
+{
+    ULONG Start = *Cursor;
+    ULONG End;
+
+    *RunLength = 0;
+    if (Entries == NULL || Start >= Count)
+        return FALSE;
+    if (!ZeroFilled)
+    {
+        *RunLength = Count - Start;
+        return TRUE;
+    }
+    while (Start < Count && GpuVaCoreEntryIsZero(Entries, Entries64KB, Start))
+        Start++;
+    if (Start >= Count)
+    {
+        *Cursor = Count;
+        return FALSE;
+    }
+    End = Start + 1;
+    while (End < Count && !GpuVaCoreEntryIsZero(Entries, Entries64KB, End))
+        End++;
+    *Cursor = Start;
+    *RunLength = End - Start;
+    return TRUE;
+}
+
+ULONG
+DxgkGpuVaCoreTableUpdateMode(
+    _In_ ULONG AdapterUpdateMode,
+    _In_ BOOLEAN HasPagingVa,
+    _In_ BOOLEAN PagingProcessInit)
+{
+    if (PagingProcessInit)
+        return DXGK_GPUVA_CORE_UPDATE_CPU_VIRTUAL;
+    if (AdapterUpdateMode == DXGK_GPUVA_CORE_UPDATE_GPU_PHYSICAL)
+        return DXGK_GPUVA_CORE_UPDATE_GPU_PHYSICAL;
+    if (HasPagingVa)
+        return DXGK_GPUVA_CORE_UPDATE_GPU_VIRTUAL;
+    return DXGK_GPUVA_CORE_UPDATE_CPU_VIRTUAL;
+}
+
+BOOLEAN
+DxgkGpuVaCoreTableNeedsCpuMapping(
+    _In_ ULONG AdapterUpdateMode,
+    _In_ BOOLEAN PagingProcessTable)
+{
+    return AdapterUpdateMode != DXGK_GPUVA_CORE_UPDATE_GPU_PHYSICAL || PagingProcessTable;
+}
+
+BOOLEAN
+DxgkGpuVaCoreUsesPagingProcessVa(
+    _In_ ULONG AdapterUpdateMode)
+{
+    return AdapterUpdateMode == DXGK_GPUVA_CORE_UPDATE_GPU_VIRTUAL ||
+           AdapterUpdateMode == DXGK_GPUVA_CORE_UPDATE_GPU_PHYSICAL;
+}
+
 /* EOF */

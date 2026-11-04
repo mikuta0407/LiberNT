@@ -3610,6 +3610,141 @@ InterfaceBusSetBusData(
     return Size;
 }
 
+static
+BOOLEAN
+PciPdoFindRomWindow(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ UCHAR BarCount,
+    _In_ ULONG RomSize,
+    _Out_ PULONG RomBase)
+{
+    ULONG AllOnes = MAXULONG;
+    UCHAR Bar;
+
+    for (Bar = 0; Bar < BarCount; Bar++)
+    {
+        ULONG Offset = FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses) + Bar * sizeof(ULONG);
+        ULONG Value;
+        ULONG Probe = 0;
+        ULONG High = 0;
+        ULONG Size;
+
+        if (PciPdoGetBusDataByOffset(DeviceExtension, &Value, Offset, sizeof(Value)) != sizeof(Value) ||
+            (Value & PCI_ADDRESS_IO_SPACE))
+        {
+            continue;
+        }
+
+        if ((Value & PCI_ADDRESS_MEMORY_TYPE_MASK) == PCI_TYPE_64BIT)
+        {
+            if (Bar + 1 >= BarCount ||
+                PciPdoGetBusDataByOffset(DeviceExtension, &High, Offset + sizeof(ULONG), sizeof(High)) != sizeof(High))
+            {
+                return FALSE;
+            }
+            Bar++;
+        }
+
+        PciPdoSetBusDataByOffset(DeviceExtension, &AllOnes, Offset, sizeof(AllOnes));
+        PciPdoGetBusDataByOffset(DeviceExtension, &Probe, Offset, sizeof(Probe));
+        PciPdoSetBusDataByOffset(DeviceExtension, &Value, Offset, sizeof(Value));
+
+        Probe &= PCI_ADDRESS_MEMORY_ADDRESS_MASK;
+        Size = Probe ? ~Probe + 1 : 0;
+        if (High == 0 && (Value & PCI_ADDRESS_MEMORY_ADDRESS_MASK) != 0 && Size >= RomSize)
+        {
+            *RomBase = Value & PCI_ADDRESS_MEMORY_ADDRESS_MASK;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static
+ULONG
+PciPdoReadRom(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension,
+    _Out_writes_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Offset,
+    _In_ ULONG Length)
+{
+    PCI_COMMON_CONFIG Header;
+    PHYSICAL_ADDRESS Physical;
+    ULONG RomOffset;
+    ULONG RomBar;
+    ULONG RomMask = PCI_ADDRESS_ROM_ADDRESS_MASK;
+    ULONG Probe = 0;
+    ULONG RomSize;
+    ULONG RomBase;
+    ULONG RomEnable;
+    ULONG Copied = 0;
+    USHORT Disabled;
+    USHORT Decode;
+    UCHAR BarCount;
+    PUCHAR Rom;
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || Length == 0 ||
+        PciPdoGetBusDataByOffset(DeviceExtension, &Header, 0, PCI_COMMON_HDR_LENGTH) != PCI_COMMON_HDR_LENGTH)
+    {
+        return 0;
+    }
+
+    switch (PCI_CONFIGURATION_TYPE(&Header))
+    {
+        case PCI_DEVICE_TYPE:
+            RomOffset = FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.ROMBaseAddress);
+            RomBar = Header.u.type0.ROMBaseAddress;
+            BarCount = PCI_TYPE0_ADDRESSES;
+            break;
+
+        case PCI_BRIDGE_TYPE:
+            RomOffset = FIELD_OFFSET(PCI_COMMON_CONFIG, u.type1.ROMBaseAddress);
+            RomBar = Header.u.type1.ROMBaseAddress;
+            BarCount = PCI_TYPE1_ADDRESSES;
+            break;
+
+        default:
+            return 0;
+    }
+
+    KeWaitForSingleObject(&PciRomLock, Executive, KernelMode, FALSE, NULL);
+
+    Disabled = Header.Command & ~(PCI_ENABLE_IO_SPACE | PCI_ENABLE_MEMORY_SPACE);
+    PciPdoSetBusDataByOffset(DeviceExtension, &Disabled, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Disabled));
+
+    PciPdoSetBusDataByOffset(DeviceExtension, &RomMask, RomOffset, sizeof(RomMask));
+    PciPdoGetBusDataByOffset(DeviceExtension, &Probe, RomOffset, sizeof(Probe));
+    Probe &= PCI_ADDRESS_ROM_ADDRESS_MASK;
+    RomSize = Probe ? ~Probe + 1 : 0;
+
+    /* TODO: read a ROM whose device has no 32-bit memory BAR at least as large as the ROM */
+    if (RomSize != 0 && Offset < RomSize && PciPdoFindRomWindow(DeviceExtension, BarCount, RomSize, &RomBase))
+    {
+        RomEnable = RomBase | PCI_ROMADDRESS_ENABLED;
+        Decode = Disabled | PCI_ENABLE_MEMORY_SPACE;
+        PciPdoSetBusDataByOffset(DeviceExtension, &RomEnable, RomOffset, sizeof(RomEnable));
+        PciPdoSetBusDataByOffset(DeviceExtension, &Decode, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Decode));
+
+        Physical.QuadPart = RomBase;
+        Rom = MmMapIoSpace(Physical, RomSize, MmNonCached);
+        if (Rom != NULL)
+        {
+            Copied = min(Length, RomSize - Offset);
+            READ_REGISTER_BUFFER_UCHAR(Rom + Offset, Buffer, Copied);
+            MmUnmapIoSpace(Rom, RomSize);
+        }
+
+        PciPdoSetBusDataByOffset(DeviceExtension, &Disabled, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Disabled));
+    }
+
+    PciPdoSetBusDataByOffset(DeviceExtension, &RomBar, RomOffset, sizeof(RomBar));
+    PciPdoSetBusDataByOffset(DeviceExtension, &Header.Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Header.Command));
+
+    KeSetEvent(&PciRomLock, IO_NO_INCREMENT, FALSE);
+    return Copied;
+}
+
 static GET_SET_DEVICE_DATA InterfaceBusGetBusData;
 
 static
@@ -3627,6 +3762,12 @@ InterfaceBusGetBusData(
 
     DPRINT("InterfaceBusGetBusData(%p 0x%lx %p 0x%lx 0x%lx) called\n",
            Context, DataType, Buffer, Offset, Length);
+
+    if (DataType == PCI_WHICHSPACE_ROM)
+    {
+        DeviceExtension = (PPDO_DEVICE_EXTENSION)((PDEVICE_OBJECT)Context)->DeviceExtension;
+        return PciPdoReadRom(DeviceExtension, Buffer, Offset, Length);
+    }
 
     if (DataType != PCI_WHICHSPACE_CONFIG && DataType != PCIConfiguration)
     {
@@ -3817,6 +3958,309 @@ InterfacePciDevicePresentEx(
 }
 
 
+static VOID PciSaveMsiState(_In_ PPDO_DEVICE_EXTENSION DeviceExtension);
+static VOID PciRestoreMsiState(_In_ PPDO_DEVICE_EXTENSION DeviceExtension);
+
+static
+UCHAR
+PciPdoExpressPortType(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension)
+{
+    USHORT Capabilities;
+    UCHAR Offset;
+
+    if (!PciPdoFindCapability(DeviceExtension, PCI_CAPABILITY_ID_PCI_EXPRESS, &Offset) ||
+        PciPdoGetBusDataByOffset(DeviceExtension, &Capabilities, Offset + 2, sizeof(Capabilities)) != sizeof(Capabilities))
+    {
+        return MAXUCHAR;
+    }
+    return (UCHAR)((Capabilities >> 4) & 0xF);
+}
+
+static
+PPDO_DEVICE_EXTENSION
+PciPdoRootPortAbove(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension)
+{
+    PPDO_DEVICE_EXTENSION Bridge;
+    UCHAR PortType;
+
+    if (DeviceExtension->Fdo == NULL)
+        return NULL;
+    PortType = PciPdoExpressPortType(DeviceExtension);
+    if (PortType != PciExpressEndpoint && PortType != PciExpressLegacyEndpoint)
+        return NULL;
+    Bridge = ((PFDO_DEVICE_EXTENSION)DeviceExtension->Fdo->DeviceExtension)->ParentPdo;
+    if (Bridge == NULL || PciPdoExpressPortType(Bridge) != PciExpressRootPort)
+        return NULL;
+    return Bridge;
+}
+
+static
+BOOLEAN
+PciPdoIsDisplayController(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension)
+{
+    PPCI_COMMON_CONFIG Config = &DeviceExtension->PciDevice->PciConfig;
+
+    return (Config->BaseClass == PCI_CLASS_DISPLAY_CTLR && Config->SubClass == PCI_SUBCLASS_VID_VGA_CTLR) ||
+           (Config->BaseClass == PCI_CLASS_PRE_20 && Config->SubClass == PCI_SUBCLASS_PRE_20_VGA);
+}
+
+static
+ULONG
+NTAPI
+PciRootPortReadConfigSpace(
+    _In_ PVOID Context,
+    _Out_writes_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Offset,
+    _In_ ULONG Length)
+{
+    PPDO_DEVICE_EXTENSION RootPort = PciPdoRootPortAbove(((PDEVICE_OBJECT)Context)->DeviceExtension);
+
+    if (RootPort == NULL || Length > PCI_EXTENDED_CONFIG_LENGTH || Offset > PCI_EXTENDED_CONFIG_LENGTH - Length)
+    {
+        RtlFillMemory(Buffer, Length, 0xFF);
+        return 0;
+    }
+    return PciPdoGetBusDataByOffset(RootPort, Buffer, Offset, Length);
+}
+
+static
+ULONG
+NTAPI
+PciRootPortWriteConfigSpace(
+    _In_ PVOID Context,
+    _In_reads_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Offset,
+    _In_ ULONG Length)
+{
+    PPDO_DEVICE_EXTENSION RootPort = PciPdoRootPortAbove(((PDEVICE_OBJECT)Context)->DeviceExtension);
+
+    if (RootPort == NULL || Length > PCI_EXTENDED_CONFIG_LENGTH || Offset > PCI_EXTENDED_CONFIG_LENGTH - Length)
+        return 0;
+    return PciPdoSetBusDataByOffset(RootPort, Buffer, Offset, Length);
+}
+
+static
+VOID
+PciReleaseQuiescentPeers(
+    _In_ PVOID Tag,
+    _In_reads_(Count) PDEVICE_OBJECT *Peers,
+    _In_ ULONG Count)
+{
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+        IoReleaseRemoveLock(&((PPDO_DEVICE_EXTENSION)Peers[Index]->DeviceExtension)->RemoveLock, Tag);
+    ExFreePoolWithTag(Peers, TAG_PCI);
+}
+
+static
+NTSTATUS
+NTAPI
+PciEnterLinkQuiescentMode(
+    _Inout_ PVOID Context)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension = ((PDEVICE_OBJECT)Context)->DeviceExtension;
+    PFDO_DEVICE_EXTENSION FdoExtension = DeviceExtension->Fdo->DeviceExtension;
+    PDEVICE_OBJECT *Peers;
+    PLIST_ENTRY Entry;
+    ULONG Capacity = 0;
+    ULONG Count = 0;
+    ULONG Index;
+    KIRQL OldIrql;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || DeviceExtension->LinkQuiescent)
+        return STATUS_UNSUCCESSFUL;
+    if (DeviceExtension->Common.DevicePowerState != PowerDeviceD0)
+        return STATUS_INVALID_DEVICE_STATE;
+
+    KeWaitForSingleObject(&FdoExtension->LinkQuiescentLock, Executive, KernelMode, FALSE, NULL);
+
+    KeAcquireSpinLock(&FdoExtension->DeviceListLock, &OldIrql);
+    for (Entry = FdoExtension->DeviceListHead.Flink; Entry != &FdoExtension->DeviceListHead; Entry = Entry->Flink)
+        Capacity++;
+    KeReleaseSpinLock(&FdoExtension->DeviceListLock, OldIrql);
+
+    Peers = ExAllocatePoolWithTag(NonPagedPool, max(Capacity, 1) * sizeof(*Peers), TAG_PCI);
+    if (Peers == NULL)
+    {
+        KeSetEvent(&FdoExtension->LinkQuiescentLock, IO_NO_INCREMENT, FALSE);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    KeAcquireSpinLock(&FdoExtension->DeviceListLock, &OldIrql);
+    for (Entry = FdoExtension->DeviceListHead.Flink;
+         Entry != &FdoExtension->DeviceListHead && Count < Capacity;
+         Entry = Entry->Flink)
+    {
+        PPCI_DEVICE Device = CONTAINING_RECORD(Entry, PCI_DEVICE, ListEntry);
+
+        if (Device->Pdo == NULL)
+            continue;
+        Status = IoAcquireRemoveLock(&((PPDO_DEVICE_EXTENSION)Device->Pdo->DeviceExtension)->RemoveLock, Context);
+        if (!NT_SUCCESS(Status))
+            break;
+        Peers[Count++] = Device->Pdo;
+    }
+    KeReleaseSpinLock(&FdoExtension->DeviceListLock, OldIrql);
+
+    if (!NT_SUCCESS(Status))
+    {
+        PciReleaseQuiescentPeers(Context, Peers, Count);
+        KeSetEvent(&FdoExtension->LinkQuiescentLock, IO_NO_INCREMENT, FALSE);
+        return Status;
+    }
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        PPDO_DEVICE_EXTENSION Peer = Peers[Index]->DeviceExtension;
+
+        PciSaveDeviceConfig(Peer->PciDevice);
+        PciSaveMsiState(Peer);
+    }
+    DeviceExtension->QuiescentPeers = Peers;
+    DeviceExtension->QuiescentPeerCount = Count;
+    DeviceExtension->LinkQuiescent = TRUE;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NTAPI
+PciExitLinkQuiescentMode(
+    _Inout_ PVOID Context)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension = ((PDEVICE_OBJECT)Context)->DeviceExtension;
+    PFDO_DEVICE_EXTENSION FdoExtension = DeviceExtension->Fdo->DeviceExtension;
+    ULONG Index;
+
+    if (!DeviceExtension->LinkQuiescent)
+        return STATUS_INVALID_DEVICE_STATE;
+
+    for (Index = 0; Index < DeviceExtension->QuiescentPeerCount; Index++)
+    {
+        PPDO_DEVICE_EXTENSION Peer = DeviceExtension->QuiescentPeers[Index]->DeviceExtension;
+
+        PciRestoreDeviceConfig(Peer->PciDevice);
+        PciRestoreMsiState(Peer);
+    }
+    PciReleaseQuiescentPeers(Context, DeviceExtension->QuiescentPeers, DeviceExtension->QuiescentPeerCount);
+    DeviceExtension->QuiescentPeers = NULL;
+    DeviceExtension->QuiescentPeerCount = 0;
+    DeviceExtension->LinkQuiescent = FALSE;
+    KeSetEvent(&FdoExtension->LinkQuiescentLock, IO_NO_INCREMENT, FALSE);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+PciPdoQueryD3Cold(
+    _In_ PPDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ SYSTEM_POWER_STATE SystemState,
+    _Out_ PACPI_PCI_D3COLD_INFORMATION Information)
+{
+    PPCI_DEVICE Device = DeviceExtension->PciDevice;
+
+    return PciAcpiQueryD3Cold(PciPdoGetSegment(DeviceExtension), Device->BusNumber,
+                              Device->SlotNumber.u.bits.DeviceNumber, Device->SlotNumber.u.bits.FunctionNumber,
+                              SystemState, Information);
+}
+
+static
+VOID
+NTAPI
+PciD3ColdSetSupport(
+    _In_reads_opt_(_Inexpressible_("varies")) PVOID Context,
+    _In_ BOOLEAN D3ColdSupport)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension = ((PDEVICE_OBJECT)Context)->DeviceExtension;
+
+    PAGED_CODE();
+
+    /* TODO: publish DEVPKEY_PciDevice_D3ColdSupport (the key is not in the SDK headers) */
+    DeviceExtension->D3ColdEnabled = D3ColdSupport;
+}
+
+static
+NTSTATUS
+NTAPI
+PciD3ColdGetIdleWakeInfo(
+    _In_reads_opt_(_Inexpressible_("varies")) PVOID Context,
+    _In_ SYSTEM_POWER_STATE SystemPowerState,
+    _Out_ PDEVICE_WAKE_DEPTH DeepestWakeableDstate)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension = ((PDEVICE_OBJECT)Context)->DeviceExtension;
+    ACPI_PCI_D3COLD_INFORMATION Information;
+
+    PAGED_CODE();
+
+    if (NT_SUCCESS(PciPdoQueryD3Cold(DeviceExtension, SystemPowerState, &Information)) &&
+        NT_SUCCESS(Information.IdleWakeStatus))
+    {
+        *DeepestWakeableDstate = (DEVICE_WAKE_DEPTH)Information.IdleWakeDepth;
+        return STATUS_SUCCESS;
+    }
+
+    if (SystemPowerState != PowerSystemWorking)
+        return STATUS_NOT_IMPLEMENTED;
+
+    /* FIXME: Windows 11 derives an S0 depth from PME support and the parent bus for some functions; LiberNT reports not wakeable */
+    *DeepestWakeableDstate = DeviceWakeDepthNotWakeable;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NTAPI
+PciD3ColdGetCapability(
+    _In_reads_opt_(_Inexpressible_("varies")) PVOID Context,
+    _Out_ PBOOLEAN D3ColdSupported)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension = ((PDEVICE_OBJECT)Context)->DeviceExtension;
+    ACPI_PCI_D3COLD_INFORMATION Information;
+
+    PAGED_CODE();
+
+    if (NT_SUCCESS(PciPdoQueryD3Cold(DeviceExtension, PowerSystemWorking, &Information)))
+    {
+        *D3ColdSupported = Information.D3ColdCapable;
+        return STATUS_SUCCESS;
+    }
+
+    /* FIXME: Windows 11 takes the answer from a parent bus value for functions without ACPI objects; LiberNT reports FALSE */
+    *D3ColdSupported = FALSE;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NTAPI
+PciD3ColdGetBusDriverSupport(
+    _In_reads_opt_(_Inexpressible_("varies")) PVOID Context,
+    _Out_ PBOOLEAN D3ColdSupported)
+{
+    UNREFERENCED_PARAMETER(Context);
+
+    *D3ColdSupported = TRUE;
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+NTAPI
+PciD3ColdGetLastTransitionStatus(
+    _In_reads_opt_(_Inexpressible_("varies")) PVOID Context,
+    _Out_ PD3COLD_LAST_TRANSITION_STATUS LastTransitionStatus)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension = ((PDEVICE_OBJECT)Context)->DeviceExtension;
+
+    *LastTransitionStatus = DeviceExtension->D3ColdAcpiDevice ? DeviceExtension->D3ColdLastTransition :
+                                                                LastDStateTransitionStatusUnknown;
+}
+
 static NTSTATUS
 PdoQueryInterface(
     IN PDEVICE_OBJECT DeviceObject,
@@ -3914,14 +4358,81 @@ PdoQueryInterface(
     else if (RtlCompareMemory(IrpSp->Parameters.QueryInterface.InterfaceType,
                               &GUID_PCI_EXPRESS_LINK_QUIESCENT_INTERFACE, sizeof(GUID)) == sizeof(GUID))
     {
-        DPRINT("GUID_PCI_EXPRESS_LINK_QUIESCENT_INTERFACE requested\n");
-        Status = STATUS_NOT_SUPPORTED;
+        PPDO_DEVICE_EXTENSION PdoExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+
+        if (IrpSp->Parameters.QueryInterface.Version != PCI_EXPRESS_LINK_QUIESCENT_INTERFACE_VERSION ||
+            !PciPdoIsDisplayController(PdoExtension) || PciPdoRootPortAbove(PdoExtension) == NULL)
+        {
+            Status = STATUS_NOT_SUPPORTED;
+        }
+        else if (IrpSp->Parameters.QueryInterface.Size < sizeof(PCI_EXPRESS_LINK_QUIESCENT_INTERFACE))
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+        }
+        else
+        {
+            PPCI_EXPRESS_LINK_QUIESCENT_INTERFACE Quiescent;
+
+            Quiescent = (PPCI_EXPRESS_LINK_QUIESCENT_INTERFACE)IrpSp->Parameters.QueryInterface.Interface;
+            Quiescent->Size = sizeof(PCI_EXPRESS_LINK_QUIESCENT_INTERFACE);
+            Quiescent->Version = PCI_EXPRESS_LINK_QUIESCENT_INTERFACE_VERSION;
+            Quiescent->PciExpressEnterLinkQuiescentMode = PciEnterLinkQuiescentMode;
+            Quiescent->PciExpressExitLinkQuiescentMode = PciExitLinkQuiescentMode;
+            Status = STATUS_SUCCESS;
+        }
     }
     else if (RtlCompareMemory(IrpSp->Parameters.QueryInterface.InterfaceType,
                               &GUID_PCI_EXPRESS_ROOT_PORT_INTERFACE, sizeof(GUID)) == sizeof(GUID))
     {
-        DPRINT("GUID_PCI_EXPRESS_ROOT_PORT_INTERFACE requested\n");
-        Status = STATUS_NOT_SUPPORTED;
+        if (IrpSp->Parameters.QueryInterface.Version != PCI_EXPRESS_ROOT_PORT_INTERFACE_VERSION ||
+            PciPdoRootPortAbove((PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension) == NULL)
+        {
+            Status = STATUS_NOT_SUPPORTED;
+        }
+        else if (IrpSp->Parameters.QueryInterface.Size < sizeof(PCI_EXPRESS_ROOT_PORT_INTERFACE))
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+        }
+        else
+        {
+            PPCI_EXPRESS_ROOT_PORT_INTERFACE RootPortInterface;
+
+            RootPortInterface = (PPCI_EXPRESS_ROOT_PORT_INTERFACE)IrpSp->Parameters.QueryInterface.Interface;
+            RootPortInterface->Size = sizeof(PCI_EXPRESS_ROOT_PORT_INTERFACE);
+            RootPortInterface->Version = PCI_EXPRESS_ROOT_PORT_INTERFACE_VERSION;
+            RootPortInterface->ReadConfigSpace = PciRootPortReadConfigSpace;
+            RootPortInterface->WriteConfigSpace = PciRootPortWriteConfigSpace;
+            Status = STATUS_SUCCESS;
+        }
+    }
+    else if (RtlCompareMemory(IrpSp->Parameters.QueryInterface.InterfaceType,
+                              &GUID_D3COLD_SUPPORT_INTERFACE, sizeof(GUID)) == sizeof(GUID))
+    {
+        if (IrpSp->Parameters.QueryInterface.Version != D3COLD_SUPPORT_INTERFACE_VERSION)
+        {
+            Status = STATUS_NOT_SUPPORTED;
+        }
+        else if (IrpSp->Parameters.QueryInterface.Size < sizeof(D3COLD_SUPPORT_INTERFACE))
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+        }
+        else
+        {
+            PPDO_DEVICE_EXTENSION PdoExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+            PD3COLD_SUPPORT_INTERFACE D3Cold;
+            ACPI_PCI_D3COLD_INFORMATION Information;
+
+            PdoExtension->D3ColdAcpiDevice = NT_SUCCESS(PciPdoQueryD3Cold(PdoExtension, PowerSystemWorking, &Information));
+            D3Cold = (PD3COLD_SUPPORT_INTERFACE)IrpSp->Parameters.QueryInterface.Interface;
+            D3Cold->Size = sizeof(D3COLD_SUPPORT_INTERFACE);
+            D3Cold->Version = D3COLD_SUPPORT_INTERFACE_VERSION;
+            D3Cold->SetD3ColdSupport = PciD3ColdSetSupport;
+            D3Cold->GetIdleWakeInfo = PciD3ColdGetIdleWakeInfo;
+            D3Cold->GetD3ColdCapability = PciD3ColdGetCapability;
+            D3Cold->GetBusDriverD3ColdSupport = PciD3ColdGetBusDriverSupport;
+            D3Cold->GetLastTransitionStatus = PciD3ColdGetLastTransitionStatus;
+            Status = STATUS_SUCCESS;
+        }
     }
     else if (RtlCompareMemory(IrpSp->Parameters.QueryInterface.InterfaceType,
                               &GUID_PCI_VIRTUALIZATION_INTERFACE, sizeof(GUID)) == sizeof(GUID))
@@ -4238,18 +4749,29 @@ PdoStartDevice(
     }
 
     PciPdoCacheMsiInfo(DeviceExtension);
-    if (PciGetPowerLevel(DeviceExtension->PciDevice) != PowerDeviceD0)
     {
         DEVICE_POWER_STATE PreviousPowerState = PciGetPowerLevel(DeviceExtension->PciDevice);
         NTSTATUS AcpiPowerStatus;
 
-        DPRINT1("PCI PDO: waking %u:%02x:%02x.%u from D%u before BAR programming\n", Segment, (UCHAR)DeviceExtension->PciDevice->BusNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber, PreviousPowerState - PowerDeviceD0);
-        AcpiPowerStatus = PciAcpiSetPower(Segment, DeviceExtension->PciDevice->BusNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber, 0);
+        /* The platform D0 (power resources, _PS0) is not implied by PMCSR D0. */
+        AcpiPowerStatus = PciAcpiSetPower(Segment, DeviceExtension->PciDevice->BusNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber, 0,
+                                          PreviousPowerState != PowerDeviceD0 ? ACPI_PCI_SET_POWER_FLAG_FORCE : 0, NULL);
         if (!NT_SUCCESS(AcpiPowerStatus) && AcpiPowerStatus != STATUS_NOT_FOUND && AcpiPowerStatus != STATUS_NOT_SUPPORTED)
             DPRINT1("PCI PDO: ACPI D0 transition failed for %u:%02x:%02x.%u (0x%08lx)\n", Segment, (UCHAR)DeviceExtension->PciDevice->BusNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber, AcpiPowerStatus);
+    }
+    if (PciGetPowerLevel(DeviceExtension->PciDevice) != PowerDeviceD0)
+    {
+        DPRINT1("PCI PDO: waking %u:%02x:%02x.%u from D%u before BAR programming\n", Segment, (UCHAR)DeviceExtension->PciDevice->BusNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber, DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber, PciGetPowerLevel(DeviceExtension->PciDevice) - PowerDeviceD0);
         PciSetPowerLevel(DeviceExtension->PciDevice, PowerDeviceD0);
-        DeviceExtension->Common.DevicePowerState = PowerDeviceD0;
         PciPdoGetBusData(DeviceExtension, &DeviceExtension->PciDevice->PciConfig, PCI_COMMON_HDR_LENGTH);
+    }
+    if (DeviceExtension->Common.DevicePowerState != PowerDeviceD0)
+    {
+        POWER_STATE D0State;
+
+        DeviceExtension->Common.DevicePowerState = PowerDeviceD0;
+        D0State.DeviceState = PowerDeviceD0;
+        PoSetPowerState(DeviceObject, DevicePowerState, D0State);
     }
     Status = PciPdoProgramType0Bars(DeviceExtension, RawResList);
     if (!NT_SUCCESS(Status))
@@ -4674,6 +5196,35 @@ PdoEject(
 }
 
 static
+VOID
+PdoPowerDownForRemove(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PPDO_DEVICE_EXTENSION DeviceExtension)
+{
+    PPCI_DEVICE Device = DeviceExtension->PciDevice;
+    POWER_STATE State;
+    NTSTATUS Status;
+
+    if (!Device->Reported || Device->IsDebuggingDevice ||
+        DeviceExtension->Common.DevicePowerState == PowerDeviceD3)
+    {
+        return;
+    }
+    /* TODO: power down a removed bridge once the debugger path below it is tracked */
+    if (PCI_CONFIGURATION_TYPE(&Device->PciConfig) != PCI_DEVICE_TYPE)
+        return;
+
+    PciSetPowerLevel(Device, PowerDeviceD3);
+    Status = PciAcpiSetPower(PciPdoGetSegment(DeviceExtension), Device->BusNumber, Device->SlotNumber.u.bits.DeviceNumber, Device->SlotNumber.u.bits.FunctionNumber, PowerDeviceD3 - PowerDeviceD0, 0, NULL);
+    if (!NT_SUCCESS(Status) && Status != STATUS_NOT_FOUND && Status != STATUS_NOT_SUPPORTED)
+        DPRINT1("PCI PDO: ACPI D3 transition failed for %u:%02x:%02x.%u (0x%08lx)\n", PciPdoGetSegment(DeviceExtension), (UCHAR)Device->BusNumber, Device->SlotNumber.u.bits.DeviceNumber, Device->SlotNumber.u.bits.FunctionNumber, Status);
+
+    DeviceExtension->Common.DevicePowerState = PowerDeviceD3;
+    State.DeviceState = PowerDeviceD3;
+    PoSetPowerState(DeviceObject, DevicePowerState, State);
+}
+
+static
 BOOLEAN
 PdoUnlinkIfNotReported(
     _In_ PPDO_DEVICE_EXTENSION DeviceExtension)
@@ -4714,6 +5265,8 @@ PdoDelete(
         IoFreeIrp(DeviceExtension->AcpiWakeIrp);
     if (DeviceExtension->AcpiWakeWorkItem != NULL)
         IoFreeWorkItem(DeviceExtension->AcpiWakeWorkItem);
+    if (DeviceExtension->D3ColdWorkItem != NULL)
+        IoFreeWorkItem(DeviceExtension->D3ColdWorkItem);
     if (Device->SavedMsixTable != NULL)
         ExFreePoolWithTag(Device->SavedMsixTable, TAG_PCI);
     ExFreePoolWithTag(Device, TAG_PCI);
@@ -4847,6 +5400,7 @@ PdoPnpControl(
             PciPdoDisableDecodes(DeviceExtension);
             PciPdoReleaseMessageRoutes(DeviceExtension);
             IoReleaseRemoveLockAndWait(&DeviceExtension->RemoveLock, Irp);
+            PdoPowerDownForRemove(DeviceObject, DeviceExtension);
             Gone = PdoUnlinkIfNotReported(DeviceExtension);
             if (!Gone)
                 IoInitializeRemoveLock(&DeviceExtension->RemoveLock, TAG_PCI, 0, 0);
@@ -4875,11 +5429,12 @@ PdoPnpControl(
         case IRP_MN_FILTER_RESOURCE_REQUIREMENTS:
             DPRINT("IRP_MN_FILTER_RESOURCE_REQUIREMENTS received\n");
             /* Nothing to do */
-            Irp->IoStatus.Status = Status;
+            Status = Irp->IoStatus.Status;
             break;
 
         default:
             DPRINT1("Unknown IOCTL 0x%lx\n", IrpSp->MinorFunction);
+            Status = Irp->IoStatus.Status;
             break;
     }
 
@@ -5411,6 +5966,130 @@ Complete:
     return Status;
 }
 
+static
+VOID
+PdoPlatformPowerDown(
+    _Inout_ PPDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ POWER_ACTION ShutdownType)
+{
+    PPCI_DEVICE Device = DeviceExtension->PciDevice;
+    ULONG Reached;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    DeviceExtension->D3ColdLastTransition = LastDStateTransitionD3hot;
+    /* TODO: run the platform D3hot transition (_PS3, _PR0 release) when D3cold is not enabled */
+    if (!DeviceExtension->D3ColdEnabled || ShutdownType != PowerActionNone || Device->IsDebuggingDevice)
+        return;
+
+    if (DeviceExtension->D3ColdWorkItem == NULL)
+        DeviceExtension->D3ColdWorkItem = IoAllocateWorkItem(DeviceExtension->Common.DeviceObject);
+    if (DeviceExtension->D3ColdWorkItem == NULL)
+        return;
+
+    Status = PciAcpiSetPower(PciPdoGetSegment(DeviceExtension), Device->BusNumber, Device->SlotNumber.u.bits.DeviceNumber, Device->SlotNumber.u.bits.FunctionNumber,
+                             PowerDeviceD3 - PowerDeviceD0, ACPI_PCI_SET_POWER_FLAG_D3COLD, &Reached);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Status != STATUS_NOT_FOUND && Status != STATUS_NOT_SUPPORTED)
+            DPRINT1("PCI PDO: ACPI D3 transition failed for %u:%02x:%02x.%u (0x%08lx)\n", PciPdoGetSegment(DeviceExtension), (UCHAR)Device->BusNumber, Device->SlotNumber.u.bits.DeviceNumber, Device->SlotNumber.u.bits.FunctionNumber, Status);
+        return;
+    }
+
+    DeviceExtension->PlatformPoweredDown = TRUE;
+    if (Reached == ACPI_PCI_POWER_STATE_D3COLD)
+        DeviceExtension->D3ColdLastTransition = LastDStateTransitionD3cold;
+}
+
+static
+VOID
+PdoPlatformPowerUp(
+    _Inout_ PPDO_DEVICE_EXTENSION DeviceExtension)
+{
+    PPCI_DEVICE Device = DeviceExtension->PciDevice;
+    LARGE_INTEGER Delay;
+    USHORT VendorId;
+    NTSTATUS Status;
+    ULONG Waited;
+
+    PAGED_CODE();
+
+    DeviceExtension->PlatformPoweredDown = FALSE;
+    Status = PciAcpiSetPower(PciPdoGetSegment(DeviceExtension), Device->BusNumber, Device->SlotNumber.u.bits.DeviceNumber, Device->SlotNumber.u.bits.FunctionNumber,
+                             0, 0, NULL);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("PCI PDO: ACPI D0 transition failed for %u:%02x:%02x.%u (0x%08lx)\n", PciPdoGetSegment(DeviceExtension), (UCHAR)Device->BusNumber, Device->SlotNumber.u.bits.DeviceNumber, Device->SlotNumber.u.bits.FunctionNumber, Status);
+    if (DeviceExtension->D3ColdLastTransition != LastDStateTransitionD3cold)
+        return;
+
+    /* TODO: shorten the reset recovery with the _DSM delay function and readiness notifications */
+    Delay.QuadPart = -10 * 1000 * 100;
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    for (Waited = 100; Waited < 1000; Waited += 100)
+    {
+        if (PciReadDeviceConfig(Device, &VendorId, 0, sizeof(VendorId)) == sizeof(VendorId) &&
+            VendorId != PCI_INVALID_VENDORID && VendorId != 0x0001)
+        {
+            break;
+        }
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+}
+
+static
+VOID
+PdoEnterD0(
+    _Inout_ PPDO_DEVICE_EXTENSION DeviceExtension)
+{
+    PPCI_DEVICE Device = DeviceExtension->PciDevice;
+
+    if (!Device)
+        return;
+
+    if (DeviceExtension->PlatformPoweredDown)
+        PdoPlatformPowerUp(DeviceExtension);
+
+    /* Transitioning to D0: program PM cap then restore config */
+    PciSetPowerLevel(Device, PowerDeviceD0);
+    PciRestoreDeviceConfig(Device);
+
+    /* Enable I/O and memory decoding, using IPI synchronization
+     * for debug devices to prevent races with KD on other CPUs */
+    if (Device->IsDebuggingDevice)
+    {
+        KdDisableDebugger();
+        PciExecuteIpiConfig(PciDecodeEnable,
+                            Device,
+                            (PVOID)(ULONG_PTR)TRUE);
+        KdEnableDebugger();
+    }
+    else
+    {
+        PciDecodeEnable(Device, (PVOID)(ULONG_PTR)TRUE);
+    }
+
+    PciRestoreMsiState(DeviceExtension);
+}
+
+static
+VOID
+NTAPI
+PdoPlatformPowerUpWorker(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_opt_ PVOID Context)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    PIRP Irp = (PIRP)Context;
+
+    PdoEnterD0(DeviceExtension);
+    DeviceExtension->Common.DevicePowerState = PowerDeviceD0;
+    PoSetPowerState(DeviceObject, DevicePowerState, IoGetCurrentIrpStackLocation(Irp)->Parameters.Power.State);
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    PoStartNextPowerIrp(Irp);
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
 NTSTATUS
 PdoPowerControl(
     PDEVICE_OBJECT DeviceObject,
@@ -5451,31 +6130,13 @@ PdoPowerControl(
                 }
                 else if (NewState == PowerDeviceD0)
                 {
-                    /* Transitioning to D0: program PM cap then restore config */
-                    if (DeviceExtension->PciDevice)
+                    if (DeviceExtension->PlatformPoweredDown && KeGetCurrentIrql() > PASSIVE_LEVEL)
                     {
-                        PPCI_DEVICE Device = DeviceExtension->PciDevice;
-
-                        PciSetPowerLevel(Device, PowerDeviceD0);
-                        PciRestoreDeviceConfig(Device);
-
-                        /* Enable I/O and memory decoding, using IPI synchronization
-                         * for debug devices to prevent races with KD on other CPUs */
-                        if (Device->IsDebuggingDevice)
-                        {
-                            KdDisableDebugger();
-                            PciExecuteIpiConfig(PciDecodeEnable,
-                                                Device,
-                                                (PVOID)(ULONG_PTR)TRUE);
-                            KdEnableDebugger();
-                        }
-                        else
-                        {
-                            PciDecodeEnable(Device, (PVOID)(ULONG_PTR)TRUE);
-                        }
-
-                        PciRestoreMsiState(DeviceExtension);
+                        IoMarkIrpPending(Irp);
+                        IoQueueWorkItem(DeviceExtension->D3ColdWorkItem, PdoPlatformPowerUpWorker, DelayedWorkQueue, Irp);
+                        return STATUS_PENDING;
                     }
+                    PdoEnterD0(DeviceExtension);
                     Status = STATUS_SUCCESS;
                 }
                 else
@@ -5486,6 +6147,8 @@ PdoPowerControl(
                         PciSaveDeviceConfig(DeviceExtension->PciDevice);
                         PciSaveMsiState(DeviceExtension);
                         PciSetPowerLevel(DeviceExtension->PciDevice, NewState);
+                        if (NewState == PowerDeviceD3)
+                            PdoPlatformPowerDown(DeviceExtension, IrpSp->Parameters.Power.ShutdownType);
                     }
                     Status = STATUS_SUCCESS;
                 }

@@ -7,9 +7,13 @@
 
 #define WIN32_NO_STATUS
 #include <windows.h>
+#include <sddl.h>
+#include <aclapi.h>
+#include <psapi.h>
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <ndk/rtlfuncs.h>
+#include <ndk/psfuncs.h>
 #include <pseh/pseh2.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +52,29 @@ ProbeStack(
 }
 
 static
+VOID
+CheckStackLimits(VOID)
+{
+    MEMORY_BASIC_INFORMATION Information = { NULL };
+    PNT_TIB Tib = (PNT_TIB)NtCurrentTeb();
+
+    CHECK(VirtualQuery(&Information, &Information, sizeof(Information)) == sizeof(Information));
+    CHECK((ULONG_PTR)&Information >= (ULONG_PTR)Tib->StackLimit && (ULONG_PTR)&Information < (ULONG_PTR)Tib->StackBase);
+    CHECK((ULONG_PTR)Information.AllocationBase < (ULONG_PTR)Tib->StackBase);
+}
+
+static
+int
+__cdecl
+CompareWithStackLimits(
+    _In_ const void *Left,
+    _In_ const void *Right)
+{
+    CheckStackLimits();
+    return *(const int *)Left - *(const int *)Right;
+}
+
+static
 DWORD
 WINAPI
 Worker(
@@ -56,6 +83,7 @@ Worker(
     ULONG_PTR Index = (ULONG_PTR)Parameter;
     ULONG Iteration;
 
+    CheckStackLimits();
     CHECK(StaticTls == 7);
     CHECK(ProbeStack(16) == 459);
     StaticTls = 100 + (LONG)Index;
@@ -83,6 +111,12 @@ TestThreads(VOID)
 {
     HANDLE Threads[WORKER_COUNT];
     DWORD Index, ExitCode;
+    int Values[2] = { 2, 1 };
+
+    CheckStackLimits();
+    qsort(Values, RTL_NUMBER_OF(Values), sizeof(Values[0]), CompareWithStackLimits);
+    CHECK(Values[0] == 1 && Values[1] == 2);
+    CheckStackLimits();
 
     InitializeCriticalSection(&Lock);
     Gate = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -114,6 +148,181 @@ TestThreads(VOID)
     CloseHandle(Gate);
     DeleteCriticalSection(&Lock);
     printf("EMUTEST: %d threads finished, counter=%ld, TLS intact\n", WORKER_COUNT, Counter);
+}
+
+#define COMMIT_THREADS 16
+
+static HANDLE CommitGate;
+static volatile LONG CommitStarted;
+
+static
+DWORD
+WINAPI
+CommitWorker(
+    _In_ PVOID Parameter)
+{
+    volatile ULONG64 Sum = 0;
+    ULONG Index;
+
+    for (Index = 0; Index < 4096; Index++)
+        Sum += Index ^ (ULONG_PTR)Parameter;
+    InterlockedIncrement(&CommitStarted);
+    WaitForSingleObject(CommitGate, 30000);
+    return Sum != 0;
+}
+
+static
+VOID
+TestThreadCommit(VOID)
+{
+    BOOL (WINAPI *GetMemoryInfo)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+    PROCESS_MEMORY_COUNTERS_EX Before, After;
+    HANDLE Threads[COMMIT_THREADS];
+    LONG64 Growth;
+    DWORD Index, Spins;
+
+    GetMemoryInfo = (PVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+    CHECK(GetMemoryInfo != NULL);
+    CommitGate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    CHECK(CommitGate != NULL);
+    if (!GetMemoryInfo || !CommitGate)
+        return;
+
+    CommitStarted = 0;
+    CHECK(GetMemoryInfo(GetCurrentProcess(), (PPROCESS_MEMORY_COUNTERS)&Before, sizeof(Before)));
+    for (Index = 0; Index < COMMIT_THREADS; Index++)
+    {
+        Threads[Index] = CreateThread(NULL, 0, CommitWorker, (PVOID)(ULONG_PTR)(Index + 1), 0, NULL);
+        CHECK(Threads[Index] != NULL);
+    }
+    for (Spins = 0; CommitStarted < COMMIT_THREADS && Spins < 3000; Spins++)
+        Sleep(10);
+    CHECK(CommitStarted == COMMIT_THREADS);
+    CHECK(GetMemoryInfo(GetCurrentProcess(), (PPROCESS_MEMORY_COUNTERS)&After, sizeof(After)));
+    Growth = (LONG64)After.PrivateUsage - (LONG64)Before.PrivateUsage;
+    CHECK(Growth < COMMIT_THREADS * 2 * 1024 * 1024);
+
+    SetEvent(CommitGate);
+    for (Index = 0; Index < COMMIT_THREADS; Index++)
+    {
+        if (!Threads[Index])
+            continue;
+        CHECK(WaitForSingleObject(Threads[Index], 30000) == WAIT_OBJECT_0);
+        CloseHandle(Threads[Index]);
+    }
+    CloseHandle(CommitGate);
+    printf("EMUTEST: %d running threads added %lld KB of private commit\n", COMMIT_THREADS, Growth / 1024);
+}
+
+#define HANDSHAKE_PAIRS  4
+#define HANDSHAKE_ROUNDS 5000
+
+typedef struct _HANDSHAKE_SIDE
+{
+    HANDLE Port;
+    volatile LONG State;
+    volatile LONG Incoming;
+} HANDSHAKE_SIDE;
+
+typedef struct _HANDSHAKE_PAIR
+{
+    HANDSHAKE_SIDE Sides[2];
+    volatile LONG LostWakeups;
+    volatile LONG Rounds;
+} HANDSHAKE_PAIR;
+
+typedef struct _HANDSHAKE_WORKER
+{
+    HANDSHAKE_PAIR *Pair;
+    ULONG Side;
+} HANDSHAKE_WORKER;
+
+static
+VOID
+HandshakePost(
+    _Inout_ HANDSHAKE_SIDE *Side)
+{
+    InterlockedIncrement(&Side->Incoming);
+    if (!InterlockedExchange(&Side->State, 1))
+        PostQueuedCompletionStatus(Side->Port, 0, 1, NULL);
+}
+
+static
+DWORD
+WINAPI
+HandshakeWorker(
+    _In_ PVOID Parameter)
+{
+    HANDSHAKE_WORKER *Worker = Parameter;
+    HANDSHAKE_SIDE *Self = &Worker->Pair->Sides[Worker->Side];
+    HANDSHAKE_SIDE *Other = &Worker->Pair->Sides[!Worker->Side];
+    LPOVERLAPPED Overlapped;
+    ULONG_PTR Key;
+    DWORD Bytes;
+    LONG Work;
+
+    if (Worker->Side == 0)
+        HandshakePost(Other);
+    while (Worker->Pair->Rounds < HANDSHAKE_ROUNDS)
+    {
+        Work = InterlockedExchange(&Self->Incoming, 0);
+        if (Work)
+        {
+            if (InterlockedIncrement(&Worker->Pair->Rounds) <= HANDSHAKE_ROUNDS)
+                HandshakePost(Other);
+            continue;
+        }
+        if (GetQueuedCompletionStatus(Self->Port, &Bytes, &Key, &Overlapped, 1000))
+            InterlockedExchange(&Self->State, 0);
+        else if (Self->Incoming)
+            InterlockedIncrement(&Worker->Pair->LostWakeups);
+    }
+    HandshakePost(Other);
+    return 0;
+}
+
+static
+VOID
+TestCompletionPortHandshake(VOID)
+{
+    static HANDSHAKE_PAIR Pairs[HANDSHAKE_PAIRS];
+    HANDSHAKE_WORKER Workers[HANDSHAKE_PAIRS * 2];
+    HANDLE Threads[HANDSHAKE_PAIRS * 2];
+    LONG Lost = 0, Rounds = 0;
+    DWORD Index, Start = GetTickCount();
+
+    RtlZeroMemory(Pairs, sizeof(Pairs));
+    for (Index = 0; Index < HANDSHAKE_PAIRS * 2; Index++)
+    {
+        HANDSHAKE_PAIR *Pair = &Pairs[Index / 2];
+
+        Pair->Sides[Index % 2].Port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+        CHECK(Pair->Sides[Index % 2].Port != NULL);
+    }
+    for (Index = 0; Index < HANDSHAKE_PAIRS * 2; Index++)
+    {
+        Workers[Index].Pair = &Pairs[Index / 2];
+        Workers[Index].Side = Index % 2;
+        Threads[Index] = CreateThread(NULL, 0, HandshakeWorker, &Workers[Index], 0, NULL);
+        CHECK(Threads[Index] != NULL);
+    }
+    for (Index = 0; Index < HANDSHAKE_PAIRS * 2; Index++)
+    {
+        if (!Threads[Index])
+            continue;
+        CHECK(WaitForSingleObject(Threads[Index], 120000) == WAIT_OBJECT_0);
+        CloseHandle(Threads[Index]);
+    }
+    for (Index = 0; Index < HANDSHAKE_PAIRS; Index++)
+    {
+        Lost += Pairs[Index].LostWakeups;
+        Rounds += min(Pairs[Index].Rounds, HANDSHAKE_ROUNDS);
+        CloseHandle(Pairs[Index].Sides[0].Port);
+        CloseHandle(Pairs[Index].Sides[1].Port);
+    }
+    CHECK(Rounds == HANDSHAKE_PAIRS * HANDSHAKE_ROUNDS);
+    CHECK(Lost == 0);
+    printf("EMUTEST: %ld completion port handshakes, %ld lost wakeups, %lu ms\n", Rounds, Lost, GetTickCount() - Start);
 }
 
 static
@@ -214,6 +423,233 @@ TestStructuredExceptions(VOID)
     CHECK(Caught == 1 && Unwound == 1 && Parameter == 0x5EC0DE);
     printf("EMUTEST: SEH caught an access violation and exception %08lx\n", (ULONG)TEST_EXCEPTION);
 }
+
+#if defined(_M_AMD64) || defined(__x86_64__)
+NTSYSAPI
+DWORD
+NTAPI
+RtlAddGrowableFunctionTable(
+    _Out_ PVOID *DynamicTable,
+    _In_reads_(MaximumEntryCount) PRUNTIME_FUNCTION FunctionTable,
+    _In_ DWORD EntryCount,
+    _In_ DWORD MaximumEntryCount,
+    _In_ ULONG_PTR RangeBase,
+    _In_ ULONG_PTR RangeEnd);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlDeleteGrowableFunctionTable(
+    _In_ PVOID DynamicTable);
+
+static
+VOID
+WINAPI
+RaiseThroughDynamicCode(VOID)
+{
+    RaiseException(TEST_EXCEPTION, 0, 0, NULL);
+}
+
+static
+PRUNTIME_FUNCTION
+CALLBACK
+LookupDynamicCode(
+    _In_ DWORD64 ControlPc,
+    _In_opt_ PVOID Context)
+{
+    return Context;
+}
+
+static
+BOOLEAN
+CallDynamicCode(
+    _In_ PVOID Code)
+{
+    volatile BOOLEAN Caught = FALSE;
+
+    _SEH2_TRY
+    {
+        ((VOID (WINAPI *)(VOID))Code)();
+    }
+    _SEH2_EXCEPT(_SEH2_GetExceptionCode() == TEST_EXCEPTION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
+        Caught = TRUE;
+    }
+    _SEH2_END;
+    return Caught;
+}
+
+static
+VOID
+TestDynamicFunctionTables(VOID)
+{
+    static const UCHAR Function[] =
+    {
+        0x48, 0x83, 0xEC, 0x28,
+        0xFF, 0x15, 0x26, 0x00, 0x00, 0x00,
+        0x48, 0x83, 0xC4, 0x28,
+        0xC3
+    };
+    static const UCHAR UnwindInfo[] = { 0x01, 0x04, 0x01, 0x00, 0x04, 0x42, 0x00, 0x00 };
+    RUNTIME_FUNCTION Entry;
+    PRUNTIME_FUNCTION Found;
+    DWORD64 ImageBase, Identifier;
+    PVOID Growable = NULL;
+    PUCHAR Base;
+
+    Base = VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    CHECK(Base != NULL);
+    if (!Base) return;
+
+    memcpy(Base + 0x10, Function, sizeof(Function));
+    *(PVOID *)(Base + 0x40) = (PVOID)RaiseThroughDynamicCode;
+    memcpy(Base + 0x80, UnwindInfo, sizeof(UnwindInfo));
+    CHECK(FlushInstructionCache(GetCurrentProcess(), Base, 4096));
+    Entry.BeginAddress = 0x10;
+    Entry.EndAddress = 0x10 + sizeof(Function);
+    Entry.UnwindData = 0x80;
+
+    CHECK(RtlAddFunctionTable(&Entry, 1, (DWORD64)Base));
+    ImageBase = 0;
+    CHECK(RtlLookupFunctionEntry((DWORD64)Base + 0x1A, &ImageBase, NULL) == &Entry && ImageBase == (DWORD64)Base);
+    CHECK(CallDynamicCode(Base + 0x10));
+    CHECK(RtlDeleteFunctionTable(&Entry));
+    CHECK(RtlLookupFunctionEntry((DWORD64)Base + 0x1A, &ImageBase, NULL) == NULL);
+
+    Identifier = (DWORD64)Base | 3;
+    CHECK(RtlInstallFunctionTableCallback(Identifier, (DWORD64)Base, 4096, LookupDynamicCode, &Entry, NULL));
+    ImageBase = 0;
+    Found = RtlLookupFunctionEntry((DWORD64)Base + 0x1A, &ImageBase, NULL);
+    CHECK(Found == &Entry && ImageBase == (DWORD64)Base);
+    CHECK(CallDynamicCode(Base + 0x10));
+    CHECK(RtlDeleteFunctionTable((PRUNTIME_FUNCTION)Identifier));
+
+    CHECK(RtlAddGrowableFunctionTable(&Growable, &Entry, 1, 1, (ULONG_PTR)Base, (ULONG_PTR)Base + 4096) == 0);
+    CHECK(Growable != NULL);
+    ImageBase = 0;
+    CHECK(RtlLookupFunctionEntry((DWORD64)Base + 0x1A, &ImageBase, NULL) == &Entry && ImageBase == (DWORD64)Base);
+    CHECK(CallDynamicCode(Base + 0x10));
+    if (Growable) RtlDeleteGrowableFunctionTable(Growable);
+    CHECK(RtlLookupFunctionEntry((DWORD64)Base + 0x1A, &ImageBase, NULL) == NULL);
+
+    CHECK(VirtualFree(Base, 0, MEM_RELEASE));
+    printf("EMUTEST: exceptions crossed code described by dynamic function tables\n");
+}
+
+static
+PVOID
+FindExportInDirectory(
+    _In_ HMODULE Module,
+    _In_ PCSTR Name)
+{
+    PUCHAR Base = (PUCHAR)Module;
+    PIMAGE_NT_HEADERS Headers = (PIMAGE_NT_HEADERS)(Base + ((PIMAGE_DOS_HEADER)Base)->e_lfanew);
+    PIMAGE_EXPORT_DIRECTORY Exports =
+        (PIMAGE_EXPORT_DIRECTORY)(Base + Headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+    PULONG Functions = (PULONG)(Base + Exports->AddressOfFunctions);
+    PULONG ExportNames = (PULONG)(Base + Exports->AddressOfNames);
+    PUSHORT Ordinals = (PUSHORT)(Base + Exports->AddressOfNameOrdinals);
+    ULONG Index;
+
+    for (Index = 0; Index < Exports->NumberOfNames; Index++)
+    {
+        if (!strcmp((PCSTR)(Base + ExportNames[Index]), Name)) return Base + Functions[Ordinals[Index]];
+    }
+    return NULL;
+}
+
+static
+VOID
+TestServiceStubs(VOID)
+{
+    static const PCSTR Names[] = { "NtClose", "ZwClose" };
+    HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+    NTSTATUS (NTAPI *Close)(HANDLE);
+    const UCHAR *Code;
+    ULONG Index;
+
+    for (Index = 0; Index < RTL_NUMBER_OF(Names); Index++)
+    {
+        Code = (const UCHAR *)GetProcAddress(Ntdll, Names[Index]);
+        CHECK(Code && Code[0] == 0x4C && Code[1] == 0x8B && Code[2] == 0xD1 && Code[3] == 0xB8);
+        if (!Code) continue;
+        Close = (NTSTATUS (NTAPI *)(HANDLE))Code;
+        CHECK(Close((HANDLE)(ULONG_PTR)0x7FFFFFF0) == STATUS_INVALID_HANDLE);
+    }
+    CHECK(FindExportInDirectory(Ntdll, "NtCreateFile") == (PVOID)GetProcAddress(Ntdll, "NtCreateFile"));
+}
+#else
+static
+VOID
+TestDynamicFunctionTables(VOID)
+{
+}
+
+
+static
+VOID
+TestServiceStubs(VOID)
+{
+}
+#endif
+
+#if defined(_M_IX86) || defined(_M_AMD64) || defined(__i386__) || defined(__x86_64__)
+static
+DWORD
+WINAPI
+RewriteCodeThread(
+    _In_ PVOID Parameter)
+{
+    static const UCHAR Code[] = { 0xB8, 0x78, 0x56, 0x34, 0x12, 0xC3 };
+
+    memcpy(Parameter, Code, sizeof(Code));
+    return 0;
+}
+
+static
+VOID
+TestSelfModifyingCode(VOID)
+{
+    static const UCHAR Code[] = { 0xB8, 0x00, 0x00, 0x00, 0x00, 0xC3 };
+    ULONG (*Function)(VOID);
+    PUCHAR Base;
+    HANDLE Thread;
+    ULONG Round, Stale = 0;
+
+    Base = VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    CHECK(Base != NULL);
+    if (!Base) return;
+
+    memcpy(Base, Code, sizeof(Code));
+    Function = (ULONG (*)(VOID))Base;
+    CHECK(Function() == 0);
+    for (Round = 1; Round <= 64; Round++)
+    {
+        *(volatile ULONG *)(Base + 1) = Round;
+        if (Function() != Round)
+            Stale++;
+    }
+    CHECK(Stale == 0);
+
+    Thread = CreateThread(NULL, 0, RewriteCodeThread, Base, 0, NULL);
+    CHECK(Thread != NULL);
+    if (Thread)
+    {
+        CHECK(WaitForSingleObject(Thread, INFINITE) == WAIT_OBJECT_0);
+        CloseHandle(Thread);
+        CHECK(Function() == 0x12345678);
+    }
+
+    CHECK(VirtualFree(Base, 0, MEM_RELEASE));
+    printf("EMUTEST: code rewritten without FlushInstructionCache ran %lu stale times of 64\n", Stale);
+}
+#else
+static
+VOID
+TestSelfModifyingCode(VOID)
+{
+}
+#endif
 
 static
 LONG
@@ -344,14 +780,22 @@ TestApcs(VOID)
 #if defined(_M_AMD64) || defined(__x86_64__)
 #define CONTEXT_PC(Context) ((Context)->Rip)
 #define CONTEXT_SP(Context) ((Context)->Rsp)
+#define CONTEXT_ARG0(Context) ((Context)->Rcx)
 #define CALL_RETURN_SLOT    sizeof(PVOID)
 #elif defined(_M_IX86) || defined(__i386__)
 #define CONTEXT_PC(Context) ((Context)->Eip)
 #define CONTEXT_SP(Context) ((Context)->Esp)
+#define CONTEXT_ARG0(Context) ((Context)->Eax)
 #define CALL_RETURN_SLOT    sizeof(PVOID)
+#elif defined(__riscv)
+#define CONTEXT_PC(Context) ((Context)->Pc)
+#define CONTEXT_SP(Context) ((Context)->Sp)
+#define CONTEXT_ARG0(Context) ((Context)->A0)
+#define CALL_RETURN_SLOT    0
 #else
 #define CONTEXT_PC(Context) ((Context)->Pc)
 #define CONTEXT_SP(Context) ((Context)->Sp)
+#define CONTEXT_ARG0(Context) ((Context)->X0)
 #define CALL_RETURN_SLOT    0
 #endif
 
@@ -444,11 +888,11 @@ TestThreadContext(VOID)
     for (Index = 0; Index < 16; Index++)
     {
         CHECK(SuspendThread(Thread) == 0);
+        Context.ContextFlags = CONTEXT_FULL;
+        CHECK(GetThreadContext(Thread, &Context));
         Before = SpinRounds;
         Sleep(5);
         CHECK(SpinRounds == Before);
-        Context.ContextFlags = CONTEXT_FULL;
-        CHECK(GetThreadContext(Thread, &Context));
         CHECK(InModule(CONTEXT_PC(&Context), GetModuleHandleW(NULL)));
         CHECK(CONTEXT_SP(&Context) <= SpinMarker && SpinMarker - CONTEXT_SP(&Context) < 0x1000);
         CHECK(ResumeThread(Thread) == 1);
@@ -673,6 +1117,9 @@ TestRv64X(VOID)
     WCHAR Directory[MAX_PATH];
     PRV64X_TEST_TABLE Table;
     char Buffer[64] = { 0 };
+    RV64X_PAIR First = { 0x1111, 0x2222 }, Second = { 0x300000000ULL, (ULONG64)-9 };
+    const LONG64 PairExpected = -3 + 0x1111 * 2 + 0x2222 * 3 + 5 * 5 + -7 * 7 + 11 * 11 + 13 * 13 +
+                                0x300000000LL * 17 + -9 * 19 + -17 * 23;
     UINT Length;
 
     Length = GetWindowsDirectoryW(Directory, MAX_PATH - 16);
@@ -687,6 +1134,7 @@ TestRv64X(VOID)
         return;
     }
     CHECK(Table->Size >= sizeof(*Table));
+    CHECK(GetModuleHandleW(RV64X_TEST_LIBRARY) != NULL);
     CHECK(((int (*)(int, short, unsigned char, long long))(ULONG_PTR)Table->Add)(-5, -300, 200, 10000000000LL) ==
           (int)(-5 - 300 + 200 + 10000000000LL));
     CHECK(((double (*)(float, double, int, float, double, int, float, double, signed char, unsigned short))
@@ -704,6 +1152,8 @@ TestRv64X(VOID)
     CHECK(((int (*)(char *, size_t, const char *, ...))(ULONG_PTR)Table->NativeFormat)(
               Buffer, sizeof(Buffer), "%.2f %d %s %lld %d %d %d %.1f", 3.25, 42, "x", 5000000000LL, 1, 2, 3, 0.5) == 30);
     CHECK(!strcmp(Buffer, "3.25 42 x 5000000000 1 2 3 0.5"));
+    CHECK(((PRV64X_PAIR_FUNCTION)(ULONG_PTR)Table->Pair)(-3, First, 5, -7, 11, 13, Second, -17) == PairExpected);
+    CHECK(((PRV64X_PAIR_FUNCTION)(ULONG_PTR)Table->NativePair)(-3, First, 5, -7, 11, 13, Second, -17) == PairExpected);
     printf("EMUTEST: RV64X entry descriptors, exit thunks and direct native entry verified\n");
 }
 #else
@@ -744,6 +1194,229 @@ TestMachines(VOID)
     printf("EMUTEST: a riscv64 machine runs riscv64, AMD64 and x86 user mode\n");
 }
 
+#define SANDBOX_CHILD_EXIT_CODE 23
+
+static
+VOID
+TestUnhandledException(VOID)
+{
+    WCHAR Path[MAX_PATH], CommandLine[MAX_PATH + 32];
+    STARTUPINFOW Si = { sizeof(Si) };
+    PROCESS_INFORMATION Pi = { NULL };
+    DWORD ExitCode = 0;
+
+    CHECK(GetModuleFileNameW(NULL, Path, ARRAYSIZE(Path)) != 0);
+    _snwprintf(CommandLine, ARRAYSIZE(CommandLine) - 1, L"\"%ls\" unhandled", Path);
+    CommandLine[ARRAYSIZE(CommandLine) - 1] = UNICODE_NULL;
+    CHECK(CreateProcessW(Path, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &Si, &Pi));
+    if (!Pi.hProcess) return;
+    CHECK(WaitForSingleObject(Pi.hProcess, 30000) == WAIT_OBJECT_0);
+    CHECK(GetExitCodeProcess(Pi.hProcess, &ExitCode) && ExitCode == (DWORD)STATUS_ACCESS_VIOLATION);
+    CloseHandle(Pi.hThread);
+    CloseHandle(Pi.hProcess);
+    printf("EMUTEST: an unhandled access violation ended the child with %08lx\n", ExitCode);
+}
+
+#define LOCKDOWN_CHILD_EXIT_CODE 24
+
+static
+VOID
+TestWin32kLockdownChild(VOID)
+{
+    WCHAR Path[MAX_PATH], CommandLine[MAX_PATH + 32];
+    STARTUPINFOEXW Si = { { sizeof(Si) } };
+    PROCESS_INFORMATION Pi = { NULL };
+    DWORD64 Policy = PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
+    SIZE_T Size = 0;
+    DWORD ExitCode = 0;
+
+    CHECK(GetModuleFileNameW(NULL, Path, ARRAYSIZE(Path)) != 0);
+    _snwprintf(CommandLine, ARRAYSIZE(CommandLine) - 1, L"\"%ls\" lockdownchild", Path);
+    CommandLine[ARRAYSIZE(CommandLine) - 1] = UNICODE_NULL;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &Size);
+    Si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, Size);
+    CHECK(Si.lpAttributeList && InitializeProcThreadAttributeList(Si.lpAttributeList, 1, 0, &Size));
+    if (!Si.lpAttributeList) return;
+    CHECK(UpdateProcThreadAttribute(Si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &Policy,
+                                    sizeof(Policy), NULL, NULL));
+    CHECK(CreateProcessW(Path, CommandLine, NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                         &Si.StartupInfo, &Pi));
+    DeleteProcThreadAttributeList(Si.lpAttributeList);
+    HeapFree(GetProcessHeap(), 0, Si.lpAttributeList);
+    if (!Pi.hProcess) return;
+    CHECK(WaitForSingleObject(Pi.hProcess, 30000) == WAIT_OBJECT_0);
+    CHECK(GetExitCodeProcess(Pi.hProcess, &ExitCode) && ExitCode == (DWORD)STATUS_DLL_INIT_FAILED);
+    CloseHandle(Pi.hThread);
+    CloseHandle(Pi.hProcess);
+    printf("EMUTEST: user32 failed to initialize in a child without win32k system calls (exit %08lx)\n", ExitCode);
+}
+
+static
+VOID
+TestSandboxedChild(VOID)
+{
+    DWORD64 Mitigations = PROCESS_CREATION_MITIGATION_POLICY_DEP_ENABLE |
+                          PROCESS_CREATION_MITIGATION_POLICY_SEHOP_ENABLE |
+                          PROCESS_CREATION_MITIGATION_POLICY_HEAP_TERMINATE_ALWAYS_ON |
+                          PROCESS_CREATION_MITIGATION_POLICY_BOTTOM_UP_ASLR_ALWAYS_ON;
+    SID_IDENTIFIER_AUTHORITY LabelAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION Limits;
+    JOBOBJECT_BASIC_UI_RESTRICTIONS Ui;
+    SID_AND_ATTRIBUTES Restricting[64];
+    WCHAR Path[MAX_PATH], CommandLine[MAX_PATH + 32];
+    WCHAR DesktopName[] = L"WinSta0\\emutest_sandbox";
+    STARTUPINFOEXW Si;
+    PROCESS_INFORMATION Pi;
+    TOKEN_MANDATORY_LABEL *Label;
+    BYTE UserBuffer[256], LabelBuffer[64];
+    PTOKEN_GROUPS Groups = NULL;
+    PTOKEN_USER User = (PTOKEN_USER)UserBuffer;
+    HANDLE Token = NULL, Restricted = NULL, Job = NULL, StdOut = NULL;
+    SECURITY_INFORMATION DesktopInfo = DACL_SECURITY_INFORMATION;
+    SECURITY_ATTRIBUTES DesktopSecurity = { sizeof(DesktopSecurity), NULL, FALSE };
+    PSECURITY_DESCRIPTOR LowLabel = NULL;
+    BOOL SaclPresent = FALSE, SaclDefaulted = FALSE, HaveUser;
+    PACL Sacl = NULL;
+    HDESK Desktop = NULL;
+    PSID LowSid = NULL;
+    SIZE_T AttributeSize = 0;
+    DWORD Length = 0, Count = 0, ExitCode = 0, Index;
+
+    CHECK(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &Token));
+    HaveUser = GetTokenInformation(Token, TokenUser, UserBuffer, sizeof(UserBuffer), &Length);
+    CHECK(HaveUser);
+    if (!HaveUser)
+    {
+        if (Token)
+            CloseHandle(Token);
+        return;
+    }
+    Restricting[Count].Sid = User->User.Sid;
+    Restricting[Count++].Attributes = 0;
+    GetTokenInformation(Token, TokenGroups, NULL, 0, &Length);
+    Groups = HeapAlloc(GetProcessHeap(), 0, Length);
+    CHECK(Groups && GetTokenInformation(Token, TokenGroups, Groups, Length, &Length));
+    for (Index = 0; Groups && Index < Groups->GroupCount && Count < ARRAYSIZE(Restricting); Index++)
+    {
+        if (Groups->Groups[Index].Attributes & SE_GROUP_INTEGRITY)
+            continue;
+        Restricting[Count].Sid = Groups->Groups[Index].Sid;
+        Restricting[Count++].Attributes = 0;
+    }
+    CHECK(CreateRestrictedToken(Token, DISABLE_MAX_PRIVILEGE, 0, NULL, 0, NULL, Count, Restricting, &Restricted));
+
+    CHECK(AllocateAndInitializeSid(&LabelAuthority, 1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0, &LowSid));
+    Label = (TOKEN_MANDATORY_LABEL *)LabelBuffer;
+    Label->Label.Sid = LowSid;
+    Label->Label.Attributes = SE_GROUP_INTEGRITY;
+    CHECK(Restricted && LowSid &&
+          SetTokenInformation(Restricted, TokenIntegrityLevel, Label, sizeof(*Label) + GetLengthSid(LowSid)));
+
+    Job = CreateJobObjectW(NULL, NULL);
+    CHECK(Job != NULL);
+    ZeroMemory(&Limits, sizeof(Limits));
+    Limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+                                              JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION |
+                                              JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    Limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    CHECK(SetInformationJobObject(Job, JobObjectExtendedLimitInformation, &Limits, sizeof(Limits)));
+    Ui.UIRestrictionsClass = JOB_OBJECT_UILIMIT_ALL;
+    CHECK(SetInformationJobObject(Job, JobObjectBasicUIRestrictions, &Ui, sizeof(Ui)));
+
+    GetUserObjectSecurity(GetThreadDesktop(GetCurrentThreadId()), &DesktopInfo, NULL, 0, &Length);
+    DesktopSecurity.lpSecurityDescriptor = HeapAlloc(GetProcessHeap(), 0, Length);
+    CHECK(DesktopSecurity.lpSecurityDescriptor &&
+          GetUserObjectSecurity(GetThreadDesktop(GetCurrentThreadId()), &DesktopInfo,
+                                DesktopSecurity.lpSecurityDescriptor, Length, &Length));
+    Desktop = CreateDesktopW(L"emutest_sandbox", NULL, NULL, 0, GENERIC_ALL, &DesktopSecurity);
+    CHECK(Desktop != NULL);
+    CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;LW)", SDDL_REVISION_1,
+                                                               &LowLabel, NULL));
+    CHECK(LowLabel && GetSecurityDescriptorSacl(LowLabel, &SaclPresent, &Sacl, &SaclDefaulted));
+    CHECK(Desktop && Sacl &&
+          SetSecurityInfo(Desktop, SE_WINDOW_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, Sacl) ==
+              ERROR_SUCCESS);
+
+    CHECK(DuplicateHandle(GetCurrentProcess(), GetStdHandle(STD_OUTPUT_HANDLE), GetCurrentProcess(), &StdOut,
+                          0, TRUE, DUPLICATE_SAME_ACCESS));
+    InitializeProcThreadAttributeList(NULL, 2, 0, &AttributeSize);
+    ZeroMemory(&Si, sizeof(Si));
+    Si.StartupInfo.cb = sizeof(Si);
+    Si.StartupInfo.lpDesktop = DesktopName;
+    Si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    Si.StartupInfo.hStdOutput = StdOut;
+    Si.StartupInfo.hStdError = StdOut;
+    Si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, AttributeSize);
+    CHECK(Si.lpAttributeList && InitializeProcThreadAttributeList(Si.lpAttributeList, 2, 0, &AttributeSize));
+    CHECK(UpdateProcThreadAttribute(Si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+                                    &Mitigations, sizeof(Mitigations), NULL, NULL));
+    CHECK(UpdateProcThreadAttribute(Si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                    &StdOut, sizeof(StdOut), NULL, NULL));
+
+    GetModuleFileNameW(NULL, Path, ARRAYSIZE(Path));
+    ZeroMemory(CommandLine, sizeof(CommandLine));
+    _snwprintf(CommandLine, ARRAYSIZE(CommandLine) - 1, L"\"%ls\" sandboxchild", Path);
+    ZeroMemory(&Pi, sizeof(Pi));
+    CHECK(CreateProcessAsUserW(Restricted, Path, CommandLine, NULL, NULL, TRUE,
+                               CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                               &Si.StartupInfo, &Pi));
+    if (Pi.hProcess)
+    {
+        PVOID NtCreateFileAddress = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateFile");
+        PROCESS_BASIC_INFORMATION ChildBasic;
+        PVOID ChildImage = NULL;
+        CONTEXT ChildContext;
+        BYTE Remote[16];
+        SIZE_T Read = 0;
+
+        CHECK(NtCreateFileAddress &&
+              ReadProcessMemory(Pi.hProcess, NtCreateFileAddress, Remote, sizeof(Remote), &Read) &&
+              Read == sizeof(Remote) && !memcmp(Remote, NtCreateFileAddress, sizeof(Remote)));
+        ZeroMemory(&ChildContext, sizeof(ChildContext));
+        ChildContext.ContextFlags = CONTEXT_FULL;
+        CHECK(GetThreadContext(Pi.hThread, &ChildContext));
+        CHECK(NT_SUCCESS(NtQueryInformationProcess(Pi.hProcess, ProcessBasicInformation, &ChildBasic,
+                                                   sizeof(ChildBasic), NULL)) &&
+              ReadProcessMemory(Pi.hProcess, &ChildBasic.PebBaseAddress->ImageBaseAddress, &ChildImage,
+                                sizeof(ChildImage), &Read));
+        CHECK(CONTEXT_ARG0(&ChildContext) ==
+              (ULONG_PTR)ChildImage + RtlImageNtHeader(GetModuleHandleW(NULL))->OptionalHeader.AddressOfEntryPoint);
+        CHECK(AssignProcessToJobObject(Job, Pi.hProcess));
+        CHECK(ResumeThread(Pi.hThread) != (DWORD)-1);
+        CHECK(WaitForSingleObject(Pi.hProcess, 120000) == WAIT_OBJECT_0);
+        CHECK(GetExitCodeProcess(Pi.hProcess, &ExitCode) && ExitCode == SANDBOX_CHILD_EXIT_CODE);
+        if (ExitCode != SANDBOX_CHILD_EXIT_CODE)
+            printf("EMUTEST: sandboxed child exit code 0x%08lx\n", ExitCode);
+        CloseHandle(Pi.hThread);
+        CloseHandle(Pi.hProcess);
+    }
+
+    if (Si.lpAttributeList)
+    {
+        DeleteProcThreadAttributeList(Si.lpAttributeList);
+        HeapFree(GetProcessHeap(), 0, Si.lpAttributeList);
+    }
+    if (StdOut)
+        CloseHandle(StdOut);
+    if (Desktop)
+        CloseDesktop(Desktop);
+    if (LowLabel)
+        LocalFree(LowLabel);
+    if (DesktopSecurity.lpSecurityDescriptor)
+        HeapFree(GetProcessHeap(), 0, DesktopSecurity.lpSecurityDescriptor);
+    if (Job)
+        CloseHandle(Job);
+    if (LowSid)
+        FreeSid(LowSid);
+    if (Restricted)
+        CloseHandle(Restricted);
+    if (Groups)
+        HeapFree(GetProcessHeap(), 0, Groups);
+    if (Token)
+        CloseHandle(Token);
+    printf("EMUTEST: a restricted, low-integrity child in a job on another desktop starts\n");
+}
+
 int
 main(
     int ArgumentCount,
@@ -752,12 +1425,28 @@ main(
     PIMAGE_NT_HEADERS Headers = RtlImageNtHeader(GetModuleHandleW(NULL));
     SYSTEM_INFO System;
 
+    if (wcsrchr(GetCommandLineW(), L' ') && !wcscmp(wcsrchr(GetCommandLineW(), L' ') + 1, L"sandboxchild"))
+        return SANDBOX_CHILD_EXIT_CODE;
+
+    if (wcsrchr(GetCommandLineW(), L' ') && !wcscmp(wcsrchr(GetCommandLineW(), L' ') + 1, L"lockdownchild"))
+        return LOCKDOWN_CHILD_EXIT_CODE;
+
+    if (wcsrchr(GetCommandLineW(), L' ') && !wcscmp(wcsrchr(GetCommandLineW(), L' ') + 1, L"unhandled"))
+    {
+        static LONG *volatile Target = NULL;
+
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        *Target = 1;
+        return 0;
+    }
+
     setvbuf(stdout, NULL, _IONBF, 0);
     GetSystemInfo(&System);
     printf("EMUTEST: hello from a machine %04x image, %u-bit pointers, processor architecture %u\n",
            Headers->FileHeader.Machine,
            (unsigned)(8 * sizeof(PVOID)),
            System.wProcessorArchitecture);
+    CHECK(ArgumentCount >= 1 && Arguments[0] != NULL && Arguments[ArgumentCount] == NULL);
     CHECK(System.dwNumberOfProcessors > 0 && System.dwPageSize == 4096);
     CHECK(Headers->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
           System.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64);
@@ -765,15 +1454,23 @@ main(
 
     TestMachines();
     TestThreads();
+    TestThreadCommit();
+    TestCompletionPortHandshake();
     TestFiles();
     TestApcs();
     TestThreadContext();
     TestStructuredExceptions();
+    TestDynamicFunctionTables();
+    TestSelfModifyingCode();
+    TestServiceStubs();
     TestFloatingStateAcrossFault();
     EmuTestCxxExceptions();
     TestMisalignedVectors();
     TestIndirectCalls();
     TestRv64X();
+    TestUnhandledException();
+    TestWin32kLockdownChild();
+    TestSandboxedChild();
 
     printf("EMUTEST: END checks=%ld failures=%ld\n", EmuTestChecks, EmuTestFailures);
     DbgPrint("EMUTEST: END checks=%ld failures=%ld\n", EmuTestChecks, EmuTestFailures);

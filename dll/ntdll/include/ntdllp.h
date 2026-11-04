@@ -130,6 +130,10 @@ VOID
 NTAPI
 LdrpReleaseForwarderReferences(IN PVOID OwnerBase);
 
+PWSTR
+NTAPI
+LdrpGetModuleLoadPath(IN PVOID DllBase);
+
 NTSTATUS
 NTAPI
 LdrpSnapThunk(IN PVOID ExportBase,
@@ -619,10 +623,19 @@ LdrpArchApplyImageView(
     _In_ PVOID ImageBase);
 
 NTSTATUS
+LdrpArchLoadEmulation(VOID);
+
+NTSTATUS
 LdrpArchStartEmulation(VOID);
 
 VOID
 LdrpArchDetachThread(VOID);
+
+VOID
+LdrpArchSnapExport(
+    _In_ PVOID ExportBase,
+    _In_opt_ PVOID ImportBase,
+    _Inout_ PULONG_PTR Function);
 
 BOOLEAN
 RtlpArchQueryPerformanceCounter(

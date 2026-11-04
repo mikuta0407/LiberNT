@@ -309,6 +309,22 @@ EvalGetPackageCount(
     return STATUS_SUCCESS;
 }
 
+static
+BOOLEAN
+EvalPackageHoldsArgumentList(
+    _In_ PACPI_METHOD_ARGUMENT Package)
+{
+    PACPI_METHOD_ARGUMENT First = (PACPI_METHOD_ARGUMENT)Package->Data;
+
+    if (Package->DataLength == 0)
+        return TRUE;
+    if (Package->DataLength < ACPI_METHOD_ARGUMENT_LENGTH(0))
+        return FALSE;
+    if (Package->Argument == 0)
+        return TRUE;
+    return ACPI_METHOD_ARGUMENT_LENGTH(First->DataLength) <= Package->DataLength;
+}
+
 /**
  * @brief Performs translation from the supplied method argument into an ACPI_OBJECT structure.
  */
@@ -380,6 +396,15 @@ EvalConvertParameterObjects(
             ULONG i, PackageCount, PackageSize;
             NTSTATUS Status;
             PACPI_METHOD_ARGUMENT PackageArgument;
+
+            if (Depth == 0 && !EvalPackageHoldsArgumentList(Argument))
+            {
+                /* TODO: confirm on Windows 11 that a package payload too short for its first argument reaches AML as a buffer */
+                Arg->Type = ACPI_TYPE_BUFFER;
+                Arg->Buffer.Pointer = &Argument->Data[0];
+                Arg->Buffer.Length = Argument->DataLength;
+                break;
+            }
 
             Arg->Type = ACPI_TYPE_PACKAGE;
 
@@ -1865,6 +1890,8 @@ AcpiSetPowerForPciDeviceIoctl(_In_ PFDO_DEVICE_DATA FdoData, _Inout_ PIRP Irp)
     PACPI_PCI_SET_POWER_INPUT_BUFFER InputBuffer;
     ACPI_HANDLE AcpiHandle = NULL;
     struct acpi_device *Device;
+    int PreviousState;
+    int TargetState;
     int Result;
 
     UNREFERENCED_PARAMETER(FdoData);
@@ -1885,14 +1912,30 @@ AcpiSetPowerForPciDeviceIoctl(_In_ PFDO_DEVICE_DATA FdoData, _Inout_ PIRP Irp)
         return STATUS_NOT_SUPPORTED;
 
     /* PMCSR D3 proves that a cached/inferred ACPI D0 cannot be trusted here. */
-    Device->flags.force_power_state = 1;
-    Result = acpi_bus_set_power(AcpiHandle, InputBuffer->State);
+    Device->flags.force_power_state = (InputBuffer->Flags & ACPI_PCI_SET_POWER_FLAG_FORCE) ? 1 : 0;
+    if (acpi_bus_get_power(AcpiHandle, &PreviousState))
+        PreviousState = ACPI_STATE_UNKNOWN;
+    TargetState = (int)InputBuffer->State;
+    if ((InputBuffer->Flags & ACPI_PCI_SET_POWER_FLAG_D3COLD) && TargetState == ACPI_STATE_D3_HOT &&
+        Device->power.states[ACPI_STATE_D3_COLD].flags.valid)
+    {
+        TargetState = ACPI_STATE_D3_COLD;
+    }
+
+    Result = acpi_bus_set_power(AcpiHandle, TargetState);
     if (Result)
     {
-        DPRINT1("ACPI: PCI %lu:%lu:%lu.%lu failed platform transition to D%lu (0x%x)\n", InputBuffer->Segment, InputBuffer->Bus, InputBuffer->Device, InputBuffer->Function, InputBuffer->State, Result);
+        DPRINT1("ACPI: PCI %lu:%lu:%lu.%lu failed platform transition D%d -> D%d (0x%x)\n", InputBuffer->Segment, InputBuffer->Bus, InputBuffer->Device, InputBuffer->Function, PreviousState, TargetState, Result);
         return STATUS_DEVICE_POWER_FAILURE;
     }
 
-    DPRINT1("ACPI: PCI %lu:%lu:%lu.%lu platform power is D%lu\n", InputBuffer->Segment, InputBuffer->Bus, InputBuffer->Device, InputBuffer->Function, InputBuffer->State);
+    if (PreviousState != TargetState || Device->flags.force_power_state)
+        DPRINT1("ACPI: PCI %lu:%lu:%lu.%lu platform power D%d -> D%d\n", InputBuffer->Segment, InputBuffer->Bus, InputBuffer->Device, InputBuffer->Function, PreviousState, TargetState);
+
+    if (IoStack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(ULONG))
+    {
+        *(PULONG)Irp->AssociatedIrp.SystemBuffer = (ULONG)TargetState;
+        Irp->IoStatus.Information = sizeof(ULONG);
+    }
     return STATUS_SUCCESS;
 }

@@ -246,6 +246,7 @@ public:
     NativePrivateData private_data;
     NativeContext *context = NULL;
     D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
+    UINT maximum_frame_latency = 3;
     volatile LONG pending_releases = 0;
     UINT threading_caps = 0;
     UINT shader_caps = 0;
@@ -379,14 +380,14 @@ public:
     HRESULT STDMETHODCALLTYPE CreateSamplerState(const D3D11_SAMPLER_DESC *pSamplerDesc, ID3D11SamplerState **ppSamplerState) override;
     HRESULT STDMETHODCALLTYPE CreateQuery(const D3D11_QUERY_DESC *pQueryDesc, ID3D11Query **ppQuery) override;
     HRESULT STDMETHODCALLTYPE CreatePredicate(const D3D11_QUERY_DESC *, ID3D11Predicate **) override;
-    HRESULT STDMETHODCALLTYPE CreateCounter(const D3D11_COUNTER_DESC *pCounterDesc, ID3D11Counter **ppCounter) override { if (ppCounter) *ppCounter = NULL; Unimplemented("CreateCounter"); return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE CreateCounter(const D3D11_COUNTER_DESC *pCounterDesc, ID3D11Counter **ppCounter) override;
     HRESULT STDMETHODCALLTYPE CreateDeferredContext(UINT ContextFlags, ID3D11DeviceContext **ppDeferredContext) override;
     HRESULT STDMETHODCALLTYPE OpenSharedResource(HANDLE hResource, REFIID ReturnedInterface, void **ppResource) override;
     HRESULT STDMETHODCALLTYPE CheckFormatSupport(DXGI_FORMAT Format, UINT *pFormatSupport) override;
     HRESULT ValidateTextureBindings(DXGI_FORMAT format, UINT bind, D3D10DDIRESOURCE_TYPE dimension);
     HRESULT STDMETHODCALLTYPE CheckMultisampleQualityLevels(DXGI_FORMAT Format, UINT SampleCount, UINT *pNumQualityLevels) override;
-    void STDMETHODCALLTYPE CheckCounterInfo(D3D11_COUNTER_INFO *pCounterInfo) override { Unimplemented("CheckCounterInfo"); }
-    HRESULT STDMETHODCALLTYPE CheckCounter(const D3D11_COUNTER_DESC *pDesc, D3D11_COUNTER_TYPE *pType, UINT *pActiveCounters, LPSTR szName, UINT *pNameLength, LPSTR szUnits, UINT *pUnitsLength, LPSTR szDescription, UINT *pDescriptionLength) override { Unimplemented("CheckCounter"); return E_NOTIMPL; }
+    void STDMETHODCALLTYPE CheckCounterInfo(D3D11_COUNTER_INFO *pCounterInfo) override;
+    HRESULT STDMETHODCALLTYPE CheckCounter(const D3D11_COUNTER_DESC *pDesc, D3D11_COUNTER_TYPE *pType, UINT *pActiveCounters, LPSTR szName, UINT *pNameLength, LPSTR szUnits, UINT *pUnitsLength, LPSTR szDescription, UINT *pDescriptionLength) override;
     HRESULT STDMETHODCALLTYPE CheckFeatureSupport(D3D11_FEATURE Feature, void *pFeatureSupportData, UINT FeatureSupportDataSize) override;
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, UINT *pDataSize, void *pData) override;
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, UINT DataSize, const void *pData) override;
@@ -1954,6 +1955,7 @@ public:
     bool ended = false;
     bool begun = false;
     bool is_predicate = false;
+    bool is_counter = false;
     explicit NativeQuery(NativeDevice *d) : NativeChild(d) {}
     ~NativeQuery()
     {
@@ -1963,6 +1965,16 @@ public:
     }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override
     {
+        if (is_counter)
+        {
+            /* A counter shares the query object; it answers only its own interfaces. */
+            if (!out) return E_INVALIDARG;
+            *out = NULL;
+            if (!IsEqualGUID(iid, IID_IUnknown) && !IsEqualGUID(iid, IID_ID3D11DeviceChild)
+                    && !IsEqualGUID(iid, IID_ID3D11Asynchronous) && !IsEqualGUID(iid, IID_ID3D11Counter))
+                return E_NOINTERFACE;
+            *out = Counter(); AddRef(); return S_OK;
+        }
         if (IsEqualGUID(iid, IID_ID3D11Asynchronous)
                 || (is_predicate && IsEqualGUID(iid, IID_ID3D11Predicate)))
         {
@@ -1971,6 +1983,7 @@ public:
         }
         return NativeChild::QueryInterface(iid, out);
     }
+    ID3D11Counter *Counter() { return reinterpret_cast<ID3D11Counter *>(static_cast<ID3D11Query *>(this)); }
     void STDMETHODCALLTYPE GetDesc(D3D11_QUERY_DESC *out) override { if (out) *out = desc; }
     UINT STDMETHODCALLTYPE GetDataSize() override { return data_size; }
 };
@@ -2602,19 +2615,17 @@ HRESULT STDMETHODCALLTYPE NativeDevice::SetMaximumFrameLatency(UINT latency)
     limit.hDevice = km_device;
     limit.Type = D3DKMT_SET_QUEUEDLIMIT_PRESENT;
     limit.QueuedPresentLimit = latency;
-    return StatusToHresult(D3DKMTSetQueuedLimit(&limit));
+    HRESULT hr = StatusToHresult(D3DKMTSetQueuedLimit(&limit));
+    if (SUCCEEDED(hr)) maximum_frame_latency = latency;
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE NativeDevice::GetMaximumFrameLatency(UINT *latency)
 {
     if (!latency) return DXGI_ERROR_INVALID_CALL;
     NativeLock guard(this);
-    D3DKMT_SETQUEUEDLIMIT limit = {};
-    limit.hDevice = km_device;
-    limit.Type = D3DKMT_GET_QUEUEDLIMIT_PRESENT;
-    HRESULT hr = StatusToHresult(D3DKMTSetQueuedLimit(&limit));
-    if (SUCCEEDED(hr)) *latency = limit.QueuedPresentLimit;
-    return hr;
+    *latency = maximum_frame_latency;
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE NativeDevice::EnqueueSetEvent(HANDLE event)
@@ -3670,6 +3681,38 @@ HRESULT STDMETHODCALLTYPE NativeDevice::CreateRenderTargetView(ID3D11Resource *r
 
 static bool NativeDisplayFormat(DXGI_FORMAT format);
 
+struct NATIVE_FORMAT_REQUIREMENT
+{
+    DXGI_FORMAT Format;
+    UINT Support[3];
+    UINT Allowed[3];
+    UINT RequiredLevels;
+};
+
+#include "native_formats.inl"
+
+/* Drivers extend typed UAV support beyond the D3D11.3 lists; back-buffer cast and encoder have no list column. */
+static const UINT NativeFormatListedSupport = ~(D3D11_FORMAT_SUPPORT_BACK_BUFFER_CAST
+        | D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW | D3D11_FORMAT_SUPPORT_VIDEO_ENCODER);
+
+static UINT NativeListedFormatSupport(DXGI_FORMAT format, D3D_FEATURE_LEVEL level, UINT support)
+{
+    /* TODO: feature level 9 requirements from the DirectX-Specs FL9_x format lists */
+    if (level < D3D_FEATURE_LEVEL_10_0) return support;
+    UINT index = level >= D3D_FEATURE_LEVEL_11_0 ? 2 : level >= D3D_FEATURE_LEVEL_10_1 ? 1 : 0;
+    const NATIVE_FORMAT_REQUIREMENT *found = NULL;
+    for (const NATIVE_FORMAT_REQUIREMENT &entry : NativeFormatRequirements)
+    {
+        if (entry.Format == format) found = &entry;
+    }
+    if (format <= DXGI_FORMAT_B4G4R4A4_UNORM)
+        support &= ~NativeFormatListedSupport | (found ? found->Allowed[index] : 0);
+    if (found && (support || (found->RequiredLevels & (1u << index)))) support |= found->Support[index];
+    const UINT mip_generation = D3D11_FORMAT_SUPPORT_RENDER_TARGET | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE | D3D11_FORMAT_SUPPORT_MIP;
+    if ((support & mip_generation) == mip_generation) support |= D3D11_FORMAT_SUPPORT_MIP_AUTOGEN;
+    return support;
+}
+
 static bool NativeIntegerFormat(DXGI_FORMAT format)
 {
     switch (format)
@@ -3767,19 +3810,29 @@ HRESULT STDMETHODCALLTYPE NativeDevice::CheckFormatSupport(DXGI_FORMAT format, U
     }
     if (NativeDisplayFormat(format) && (*support & D3D11_FORMAT_SUPPORT_RENDER_TARGET))
         *support |= D3D11_FORMAT_SUPPORT_DISPLAY;
+    /* TODO: decoder, video processor and encoder bits from the driver's video capabilities */
+    *support = NativeListedFormatSupport(format, feature_level, *support);
+    if ((*support & D3D11_FORMAT_SUPPORT_DISPLAY) && (format == DXGI_FORMAT_R8G8B8A8_UNORM
+            || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_R10G10B10A2_UNORM
+            || format == DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM
+            || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB))
+        *support |= D3D11_FORMAT_SUPPORT_BACK_BUFFER_CAST;
     return *support ? S_OK : E_FAIL;
 }
 
 HRESULT STDMETHODCALLTYPE NativeDevice::CheckMultisampleQualityLevels(DXGI_FORMAT format, UINT samples, UINT *quality)
 {
     if (!quality || static_cast<UINT>(format) > DXGI_FORMAT_A4B4G4R4_UNORM) return E_INVALIDARG;
+    if (samples == 1) { *quality = 1; return S_OK; }
     *quality = 0;
     if (!samples || samples > D3D11_MAX_MULTISAMPLE_SAMPLE_COUNT) return E_FAIL;
     if (!functions.pfnCheckMultisampleQualityLevels) return E_NOTIMPL;
     NativeLock guard(this);
+    UINT levels = 0;
     BeginCall();
-    functions.pfnCheckMultisampleQualityLevels(driver_device, format, samples, quality);
-    return operation_error;
+    functions.pfnCheckMultisampleQualityLevels(driver_device, format, samples, &levels);
+    *quality = min(levels, 0x80000000u);
+    return S_OK;
 }
 
 static bool NativeFeatureData(void *data, UINT size, SIZE_T expected)
@@ -5263,6 +5316,90 @@ HRESULT STDMETHODCALLTYPE NativeDevice::CreateQuery(const D3D11_QUERY_DESC *desc
     if (FAILED(hr)) { query->Release(); return hr; }
     query->created = true;
     *out = query;
+    return S_OK;
+}
+
+void STDMETHODCALLTYPE NativeDevice::CheckCounterInfo(D3D11_COUNTER_INFO *info)
+{
+    if (!info) return;
+    memset(info, 0, sizeof(*info));
+    if (!functions.pfnCheckCounterInfo) return;
+    D3D10DDI_COUNTER_INFO driver_info = {};
+    NativeLock guard(this);
+    functions.pfnCheckCounterInfo(driver_device, &driver_info);
+    info->LastDeviceDependentCounter = static_cast<D3D11_COUNTER>(driver_info.LastDeviceDependentCounter);
+    info->NumSimultaneousCounters = driver_info.NumSimultaneousCounters;
+    info->NumDetectableParallelUnits = driver_info.NumDetectableParallelUnits;
+}
+
+static UINT NativeCounterDataSize(D3D11_COUNTER_TYPE type)
+{
+    switch (type)
+    {
+        case D3D11_COUNTER_TYPE_FLOAT32: return sizeof(FLOAT);
+        case D3D11_COUNTER_TYPE_UINT16: return sizeof(UINT16);
+        case D3D11_COUNTER_TYPE_UINT32: return sizeof(UINT32);
+        default: return sizeof(UINT64);
+    }
+}
+
+HRESULT STDMETHODCALLTYPE NativeDevice::CheckCounter(const D3D11_COUNTER_DESC *desc, D3D11_COUNTER_TYPE *type,
+        UINT *active_counters, LPSTR name, UINT *name_length, LPSTR units, UINT *units_length,
+        LPSTR description, UINT *description_length)
+{
+    if (!desc || !type || desc->MiscFlags) return E_INVALIDARG;
+    if (desc->Counter < D3D11_COUNTER_DEVICE_DEPENDENT_0) return E_INVALIDARG;
+    D3D11_COUNTER_INFO info;
+    CheckCounterInfo(&info);
+    if (!functions.pfnCheckCounter || desc->Counter > info.LastDeviceDependentCounter) return E_INVALIDARG;
+    D3D10DDI_COUNTER_TYPE driver_type = static_cast<D3D10DDI_COUNTER_TYPE>(-1);
+    UINT active = 0;
+    NativeLock guard(this);
+    BeginCall();
+    functions.pfnCheckCounter(driver_device, static_cast<D3D10DDI_QUERY>(desc->Counter), &driver_type, &active,
+            name, name_length, units, units_length, description, description_length);
+    if (operation_error == E_INVALIDARG) return E_INVALIDARG;
+    switch (driver_type)
+    {
+        case D3D10DDI_COUNTER_TYPE_FLOAT32: *type = D3D11_COUNTER_TYPE_FLOAT32; break;
+        case D3D10DDI_COUNTER_TYPE_UINT16: *type = D3D11_COUNTER_TYPE_UINT16; break;
+        case D3D10DDI_COUNTER_TYPE_UINT32: *type = D3D11_COUNTER_TYPE_UINT32; break;
+        default: *type = D3D11_COUNTER_TYPE_UINT64; break;
+    }
+    if (active_counters) *active_counters = active;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE NativeDevice::CreateCounter(const D3D11_COUNTER_DESC *desc, ID3D11Counter **out)
+{
+    if (out) *out = NULL;
+    D3D11_COUNTER_TYPE type = D3D11_COUNTER_TYPE_FLOAT32;
+    UINT active = 0;
+    HRESULT hr = CheckCounter(desc, &type, &active, NULL, NULL, NULL, NULL, NULL, NULL);
+    if (FAILED(hr)) return hr;
+    UINT data_size = NativeCounterDataSize(type);
+    if (!functions.pfnCalcPrivateQuerySize || !functions.pfnCreateQuery || !functions.pfnDestroyQuery
+            || !functions.pfnQueryGetData || !functions.pfnQueryEnd) return DXGI_ERROR_UNSUPPORTED;
+    if (!out) return S_FALSE;
+    D3D10DDIARG_CREATEQUERY args = {};
+    args.Query = static_cast<D3D10DDI_QUERY>(desc->Counter);
+    NativeLock guard(this);
+    NativeQuery *query = new NativeQuery(this);
+    if (!query) return E_OUTOFMEMORY;
+    query->desc.Query = static_cast<D3D11_QUERY>(desc->Counter);
+    query->desc.MiscFlags = desc->MiscFlags;
+    query->data_size = data_size;
+    query->is_counter = true;
+    SIZE_T size = functions.pfnCalcPrivateQuerySize(driver_device, &args);
+    query->handle.pDrvPrivate = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size ? size : 1);
+    if (!query->handle.pDrvPrivate) { query->Release(); return E_OUTOFMEMORY; }
+    D3D10DDI_HRTQUERY runtime_query = {query};
+    BeginCall();
+    functions.pfnCreateQuery(driver_device, &args, query->handle, runtime_query);
+    hr = operation_error;
+    if (FAILED(hr)) { query->Release(); return hr; }
+    query->created = true;
+    *out = query->Counter();
     return S_OK;
 }
 

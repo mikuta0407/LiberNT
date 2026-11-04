@@ -140,8 +140,93 @@ EmuReportProcessor(
         return;
     }
 
+    UpdateProcessorInformation(Information);
+}
+
+VOID
+NTAPI
+UpdateProcessorInformation(
+    _Inout_ PVOID ProcessorInformation)
+{
+    PSYSTEM_PROCESSOR_INFORMATION Information = ProcessorInformation;
+
     Information->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
     EmuCoreGetProcessor(&Information->ProcessorLevel, &Information->ProcessorRevision);
+}
+
+VOID
+NTAPI
+NotifyMemoryFree(
+    _In_ PVOID Address,
+    _In_ SIZE_T Size,
+    _In_ ULONG FreeType,
+    _In_ BOOLEAN After,
+    _In_ NTSTATUS Status)
+{
+    if (After && NT_SUCCESS(Status))
+    {
+        EmuCoreForgetCode(Address, Size);
+        EmuCoreInvalidate(Address, Size);
+    }
+}
+
+VOID
+NTAPI
+NotifyMemoryProtect(
+    _In_ PVOID Address,
+    _In_ SIZE_T Size,
+    _In_ ULONG NewProtect,
+    _In_ BOOLEAN After,
+    _In_ NTSTATUS Status)
+{
+    EmuCoreForgetCode(Address, Size);
+    if (After && NT_SUCCESS(Status))
+    {
+        EmuCoreProtectCode(Address, Size, NewProtect);
+        EmuCoreInvalidate(Address, Size);
+    }
+}
+
+VOID
+NTAPI
+NotifyUnmapViewOfSection(
+    _In_ PVOID Address,
+    _In_ BOOLEAN After,
+    _In_ NTSTATUS Status)
+{
+    PVOID Base;
+    SIZE_T Size;
+
+    if (After) return;
+    EmuQueryView(Address, &Base, &Size);
+    EmuCoreForgetCode(Base, Size);
+    EmuCoreInvalidate(Base, Size);
+}
+
+VOID
+NTAPI
+ProcessTerm(
+    _In_opt_ HANDLE ProcessHandle,
+    _In_ BOOLEAN After,
+    _In_ NTSTATUS Status)
+{
+    if (ProcessHandle) return;
+    if (After)
+        EmuCoreEndTermination(NT_SUCCESS(Status));
+    else
+        EmuCoreBeginTermination();
+}
+
+VOID
+NTAPI
+BTCpu64FlushInstructionCache(
+    _In_opt_ const VOID *Address,
+    _In_ SIZE_T Size)
+{
+    if (!Address)
+        EmuCoreInvalidate(NULL, EMU_ADDRESS_SPACE_SIZE);
+    else
+        EmuCoreInvalidate((PVOID)Address, Size);
 }
 
 static
@@ -158,6 +243,7 @@ EmuNtService(
     PVOID Base = NULL;
     SIZE_T Size = 0;
     PVOID ApcRecord = NULL;
+    ULONG OriginalProtect = 0;
     NTSTATUS Status;
 
     switch (Service)
@@ -264,6 +350,11 @@ EmuNtService(
             if (EmuIsCurrentProcess((HANDLE)Arguments[0])) EmuQueryView((PVOID)Arguments[1], &Base, &Size);
             break;
 
+        case EmuNtProtectVirtualMemory:
+            if (EmuIsCurrentProcess((HANDLE)Arguments[0]))
+                OriginalProtect = EmuCoreForgetCode(*(PVOID *)Arguments[1], *(PSIZE_T)Arguments[2]);
+            break;
+
         case EmuNtTerminateProcess:
             if (!Arguments[0]) EmuCoreBeginTermination();
             break;
@@ -278,7 +369,16 @@ EmuNtService(
     {
         case EmuNtUnmapViewOfSection:
         case EmuNtUnmapViewOfSectionEx:
-            if (Size) EmuCoreInvalidate(Base, Size);
+            if (Size)
+            {
+                EmuCoreForgetCode(Base, Size);
+                EmuCoreInvalidate(Base, Size);
+            }
+            break;
+
+        case EmuNtAllocateVirtualMemory:
+            if (EmuIsCurrentProcess((HANDLE)Arguments[0]))
+                EmuCoreForgetCode(*(PVOID *)Arguments[1], *(PSIZE_T)Arguments[3]);
             break;
 
         case EmuNtMapViewOfSection:
@@ -289,7 +389,14 @@ EmuNtService(
         case EmuNtFreeVirtualMemory:
         case EmuNtProtectVirtualMemory:
             if (EmuIsCurrentProcess((HANDLE)Arguments[0]))
+            {
+                EmuCoreForgetCode(*(PVOID *)Arguments[1], *(PSIZE_T)Arguments[2]);
+                if (Service == EmuNtProtectVirtualMemory)
+                    EmuCoreProtectCode(*(PVOID *)Arguments[1], *(PSIZE_T)Arguments[2], (ULONG)Arguments[3]);
+                if (OriginalProtect != 0)
+                    *(PULONG)Arguments[4] = OriginalProtect;
                 EmuCoreInvalidate(*(PVOID *)Arguments[1], *(PSIZE_T)Arguments[2]);
+            }
             break;
 
         case EmuNtFlushInstructionCache:
@@ -331,6 +438,12 @@ EmuSystemService(
     if (Service >= EMU_HOST_SERVICE_BASE)
     {
         EmuHostService(Thread, Service, Registers);
+        return;
+    }
+
+    if (EmuProcess.Attached)
+    {
+        EmuX64SystemService(Service, Registers);
         return;
     }
 

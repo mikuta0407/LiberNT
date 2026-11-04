@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     devclass.c
+    DevicePowerOnDisable.c
     InterruptAffinityPolicy.c
     InvalidDeviceInfoSet.c
     SetupCommitFileQueue.c
@@ -8,6 +9,7 @@ list(APPEND SOURCE
     SetupDiGetActualModelsSection.c
     SetupInstallFile.c
     SetupInstallServicesFromInfSectionEx.c
+    UsbInterfaceIds.c
     testlist.c)
 
 add_executable(setupapi_apitest ${SOURCE})

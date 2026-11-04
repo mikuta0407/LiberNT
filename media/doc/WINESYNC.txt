@@ -185,6 +185,7 @@ dll/win32/nddeapi             # Synced to Wine-11.14
 dll/win32/netapi32            # Synced to Wine-11.14
 dll/win32/netprofm            # Synced to Wine-11.14
 dll/win32/netutils            # Synced to Wine-11.14
+dll/win32/npmshtml            # Synced to Wine-11.14
 dll/win32/npptools            # Synced to Wine-11.14
 dll/win32/nsi                 # Synced to Wine-11.14
 dll/win32/ntdsapi             # Synced to Wine-11.14
@@ -334,6 +335,7 @@ ReactOS shares the following programs with Winehq.
 base/applications/cmdutils/cscript  # Synced to Wine-11.14
 base/applications/cmdutils/reg      # Synced to Wine-11.14
 base/applications/cmdutils/schtasks # Synced to Wine-11.14
+base/applications/cmdutils/start    # Synced to Wine-11.14
 base/applications/cmdutils/taskkill # Synced to Wine-11.14
 base/applications/cmdutils/wmic     # Synced to Wine-11.14
 base/applications/cmdutils/wscript  # Synced to Wine-11.14
@@ -346,6 +348,7 @@ base/applications/winhlp32          # Synced to Wine-11.14
 base/applications/wordpad           # Synced to Wine-11.14
 base/applications/write             # Synced to Wine-11.14
 base/services/rpcss                 # Synced to Wine-10.0
+base/shell/cmd                      # Synced to Wine-11.14
 base/services/schedsvc              # Synced to Wine-11.14
 base/system/conhost                 # Synced to Wine-11.14
 base/system/expand                  # Synced to Wine-11.14

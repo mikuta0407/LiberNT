@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     AddMandatoryAce.c
+    ControlServiceEx.c
     CopySid.c
     CreateService.c
     DuplicateTokenEx.c
@@ -11,10 +12,12 @@ list(APPEND SOURCE
     InitiateShutdown.c
     IntegrityLabels.c
     LogonSession.c
+    LogonUserNetwork.c
     IsTextUnicode.c
     LockServiceDatabase.c
     LookupAccountName.c
     LookupAccountSid.c
+    OpenTrace.c
     QueryServiceConfig2.c
     RegCreateKeyEx.c
     RegCreateKeyTransacted.c

@@ -23,7 +23,7 @@ int main(void)
         for (Flags = 0; Flags < 128; Flags++)
         {
             Pte = MiArchPteMakeLeaf(Frame, Protection, Flags);
-            if (!MI_PROT_IS_ACCESSIBLE(Protection) || (Protection & MI_PROT_GUARD))
+            if (!MI_PROT_IS_ACCESSIBLE(Protection) || MI_PROT_IS_GUARD(Protection))
             {
                 CHECK(Pte == 0);
                 continue;
@@ -31,7 +31,9 @@ int main(void)
             CHECK(MiArchPteIsValid(Pte));
             CHECK(MiArchPteFrame(Pte) == Frame);
             CHECK(MiArchPteIsUser(Pte) == !!(Flags & MI_LEAF_USER));
-            CHECK(MiArchPteIsExecutable(Pte, TRUE));
+            CHECK(MiArchPteIsExecutable(Pte, TRUE) == !!MI_PROT_IS_EXECUTE(Protection));
+            CHECK(MiArchPteGrantUserExecute(Pte) == Pte);
+            CHECK(MiArchPteRevokeUserExecute(Pte) == Pte);
             CHECK(MiArchPteIsWritable(Pte) == !!MI_PROT_IS_WRITABLE(Protection));
             CHECK(MiArchPteIsCopyOnWrite(Pte) == !!MI_PROT_IS_COPY(Protection));
             CHECK(!!(Pte & MI_I386_PTE_GLOBAL) == !!((Flags & MI_LEAF_GLOBAL) && !(Flags & MI_LEAF_USER)));

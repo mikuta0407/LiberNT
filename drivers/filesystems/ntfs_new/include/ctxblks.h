@@ -120,7 +120,9 @@ typedef struct _NtfsMissingName
     LIST_ENTRY Link;
     LIST_ENTRY HashLink;
     ULONG Hash;
+    ULONG LeafHash;
     USHORT Length;
+    USHORT LeafStart;
     WCHAR Name[1];
 } NtfsMissingName, *PNtfsMissingName;
 
@@ -185,6 +187,16 @@ NtfsEvictCachedRecord(_In_ PVolumeContextBlock VolCB,
                       _In_reads_(Length) PCWSTR Name,
                       _In_ USHORT Length,
                       _In_ BOOLEAN RecordAlreadyFreed);
+
+VOID
+NtfsEvictCachedRecordsUnder(_In_ PVolumeContextBlock VolCB,
+                            _In_reads_(Length) PCWSTR Directory,
+                            _In_ USHORT Length);
+
+PWCHAR
+NtfsCopyCachedRecordName(_In_ PVolumeContextBlock VolCB,
+                         _In_ ULONGLONG FileReference,
+                         _Out_ PUSHORT Length);
 
 /*
  * The library keeps the disk it reads through in one process-global slot, so
@@ -259,6 +271,14 @@ typedef struct _NTFS_LCB_ENTRY
     LIST_ENTRY HashEntry;
 } NTFS_LCB_ENTRY, *PNTFS_LCB_ENTRY;
 
+/* A link whose name was removed while handles stay open is in no parent or hash list. */
+FORCEINLINE
+BOOLEAN
+NtfsIsLinkDetached(_In_ PNTFS_NATIVE_LCB Lcb)
+{
+    return IsListEmpty(&Lcb->ParentEntry);
+}
+
 FORCEINLINE
 PLIST_ENTRY
 NtfsLinkHashBucket(_In_ PVolumeContextBlock VolCB,
@@ -300,6 +320,7 @@ typedef struct _SCB
     BOOLEAN SizePending;
     BOOLEAN Deleted;
     BOOLEAN DeletePending;
+    BOOLEAN Unlinked;
     LONG UncleanCount;
     NTFS_NATIVE_SCB NativeScb;
 } StreamContextBlock, *PStreamContextBlock;
@@ -352,6 +373,7 @@ typedef struct _FCB
     /* Set through FileDispositionInformation or FILE_DELETE_ON_CLOSE;
      * the name is removed when the handle goes away. */
     BOOLEAN DeletePending;
+    BOOLEAN PosixDelete;
     BOOLEAN WriteTimesStamped;
     BOOLEAN ShareAccessSet;
 
@@ -542,6 +564,10 @@ NtfsReportFileChange(_In_ PVolumeContextBlock VolCB,
                      _In_ PFileContextBlock FileCB,
                      _In_ ULONG FilterMatch,
                      _In_ ULONG Action);
+
+NTSTATUS
+NtfsQueryLxMetadata(_In_ PFileContextBlock FileCB,
+                    _Inout_ PFILE_STAT_LX_INFORMATION Stat);
 
 static inline
 VOID

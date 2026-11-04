@@ -5,6 +5,13 @@ list(APPEND SOURCE
     WindowPropertyStore.cpp
     AddCommas.cpp
     AssocCreateElement.cpp
+    AssocCreateForClasses.cpp
+    DefaultProperties.cpp
+    ILLoadFromStreamEx.cpp
+    ItemPropertyStores.cpp
+    LocalizedName.cpp
+    SHAssocEnumHandlers.cpp
+    SHGetDriveMedia.cpp
     CFSFolder.cpp
     CheckEscapes.cpp
     CIDLData.cpp
@@ -55,6 +62,7 @@ list(APPEND SOURCE
     #ShellExec_RunDLL.cpp # Broke on Windows
     #ShellExecCmdLine.cpp # Broke on Windows
     ShellExecuteEx.cpp
+    ShellExecuteLink.cpp
     #ShellExecuteW.cpp # Broke on Windows
     ShellHook.cpp
     ShellInfo.cpp

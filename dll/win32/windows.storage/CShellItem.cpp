@@ -30,12 +30,15 @@ EXTERN_C HRESULT WINAPI SHCreateShellItem(PCIDLIST_ABSOLUTE pidlParent,
     IShellFolder *psfParent, PCUITEMID_CHILD pidl, IShellItem **ppsi);
 
 CShellItem::CShellItem() :
-    m_pidl(NULL)
+    m_pidl(NULL),
+    m_pTemporaryStore(NULL)
 {
 }
 
 CShellItem::~CShellItem()
 {
+    if (m_pTemporaryStore)
+        m_pTemporaryStore->Release();
     ILFree(m_pidl);
 }
 
@@ -471,6 +474,68 @@ HRESULT CShellItem::GetDefaultPropertyStore(IPropertyStore **ppStore)
     return S_OK;
 }
 
+class CReadOnlyPropertyStore :
+    public CComObjectRootEx<CComMultiThreadModelNoCS>,
+    public IPropertyStore,
+    public IPropertyStoreCapabilities
+{
+public:
+    CComPtr<IPropertyStore> m_pInner;
+
+    STDMETHOD(GetCount)(DWORD *cProps) override
+    {
+        return m_pInner->GetCount(cProps);
+    }
+
+    STDMETHOD(GetAt)(DWORD iProp, PROPERTYKEY *pkey) override
+    {
+        return m_pInner->GetAt(iProp, pkey);
+    }
+
+    STDMETHOD(GetValue)(REFPROPERTYKEY key, PROPVARIANT *pv) override
+    {
+        return m_pInner->GetValue(key, pv);
+    }
+
+    STDMETHOD(SetValue)(REFPROPERTYKEY key, REFPROPVARIANT propvar) override
+    {
+        return STG_E_ACCESSDENIED;
+    }
+
+    STDMETHOD(Commit)() override
+    {
+        return STG_E_ACCESSDENIED;
+    }
+
+    STDMETHOD(IsPropertyWritable)(REFPROPERTYKEY key) override
+    {
+        return S_OK;
+    }
+
+    DECLARE_NOT_AGGREGATABLE(CReadOnlyPropertyStore)
+    DECLARE_PROTECT_FINAL_CONSTRUCT()
+
+    BEGIN_COM_MAP(CReadOnlyPropertyStore)
+        COM_INTERFACE_ENTRY_IID(IID_IPropertyStore, IPropertyStore)
+        COM_INTERFACE_ENTRY_IID(IID_IPropertyStoreCapabilities, IPropertyStoreCapabilities)
+    END_COM_MAP()
+};
+
+EXTERN_C HRESULT SHELL_CreateReadOnlyPropertyStore(IPropertyStore *pInner, REFIID riid, void **ppv)
+{
+    CComObject<CReadOnlyPropertyStore> *pReadOnly;
+    CComPtr<IPropertyStore> pHolder;
+    HRESULT hr;
+
+    *ppv = NULL;
+    hr = CComObject<CReadOnlyPropertyStore>::CreateInstance(&pReadOnly);
+    if (FAILED(hr))
+        return hr;
+    pHolder = pReadOnly;
+    pReadOnly->m_pInner = pInner;
+    return pHolder->QueryInterface(riid, ppv);
+}
+
 HRESULT WINAPI CShellItem::GetPropertyStore(GETPROPERTYSTOREFLAGS flags, REFIID riid, void **ppv)
 {
     return GetPropertyStoreWithCreateObject(flags, NULL, riid, ppv);
@@ -483,15 +548,27 @@ HRESULT WINAPI CShellItem::GetPropertyStoreWithCreateObject(GETPROPERTYSTOREFLAG
     HRESULT hr;
 
     *ppv = NULL;
+    if (flags & GPS_TEMPORARY)
+    {
+        if (!m_pTemporaryStore)
+        {
+            hr = PSCreateMemoryPropertyStore(IID_PPV_ARG(IPropertyStore, &pStore));
+            if (FAILED(hr))
+                return hr;
+            if (!InterlockedCompareExchangePointer((PVOID *)&m_pTemporaryStore, (IPropertyStore *)pStore, NULL))
+                pStore.Detach();
+        }
+        return m_pTemporaryStore->QueryInterface(riid, ppv);
+    }
     if (SUCCEEDED(BindToHandler(NULL, BHID_PropertyStore, IID_PPV_ARG(IPropertyStoreFactory, &pFactory))))
         return pFactory->GetPropertyStore(flags, punkCreateObject, riid, ppv);
     if (flags & GPS_READWRITE)
-        return STG_E_ACCESSDENIED;
+        return E_FAIL;
 
     hr = GetDefaultPropertyStore(&pStore);
     if (FAILED(hr))
         return hr;
-    return pStore->QueryInterface(riid, ppv);
+    return SHELL_CreateReadOnlyPropertyStore(pStore, riid, ppv);
 }
 
 HRESULT WINAPI CShellItem::GetPropertyStoreForKeys(const PROPERTYKEY *rgKeys, UINT cKeys, GETPROPERTYSTOREFLAGS flags, REFIID riid, void **ppv)
@@ -980,6 +1057,52 @@ EXTERN_C HRESULT WINAPI SHGetPropertyStoreFromParsingName(PCWSTR pszPath, IBindC
     hr = SHCreateItemFromParsingName(pszPath, pbc, IID_PPV_ARG(IShellItem2, &item));
     if (SUCCEEDED(hr))
         hr = item->GetPropertyStore(flags, riid, ppv);
+    return hr;
+}
+
+EXTERN_C HRESULT WINAPI SHGetPropertyStoreFromIDList(PCIDLIST_ABSOLUTE pidl, GETPROPERTYSTOREFLAGS flags,
+    REFIID riid, void **ppv)
+{
+    CComPtr<IShellItem2> item;
+    HRESULT hr;
+
+    if (!ppv)
+        return E_POINTER;
+    *ppv = NULL;
+    if (!pidl)
+        return E_INVALIDARG;
+    hr = SHCreateItemFromIDList(pidl, IID_PPV_ARG(IShellItem2, &item));
+    if (SUCCEEDED(hr))
+        hr = item->GetPropertyStore(flags, riid, ppv);
+    return hr;
+}
+
+EXTERN_C HRESULT WINAPI SHGetTemporaryPropertyForItem(IShellItem *psi, REFPROPERTYKEY propkey, PROPVARIANT *ppropvar)
+{
+    CComPtr<IShellItem2> item;
+    CComPtr<IPropertyStore> store;
+    HRESULT hr;
+
+    PropVariantInit(ppropvar);
+    hr = psi->QueryInterface(IID_PPV_ARG(IShellItem2, &item));
+    if (SUCCEEDED(hr))
+        hr = item->GetPropertyStore(GPS_TEMPORARY, IID_PPV_ARG(IPropertyStore, &store));
+    if (SUCCEEDED(hr))
+        hr = store->GetValue(propkey, ppropvar);
+    return hr;
+}
+
+EXTERN_C HRESULT WINAPI SHSetTemporaryPropertyForItem(IShellItem *psi, REFPROPERTYKEY propkey, REFPROPVARIANT propvar)
+{
+    CComPtr<IShellItem2> item;
+    CComPtr<IPropertyStore> store;
+    HRESULT hr;
+
+    hr = psi->QueryInterface(IID_PPV_ARG(IShellItem2, &item));
+    if (SUCCEEDED(hr))
+        hr = item->GetPropertyStore(GPS_TEMPORARY, IID_PPV_ARG(IPropertyStore, &store));
+    if (SUCCEEDED(hr))
+        hr = store->SetValue(propkey, propvar);
     return hr;
 }
 

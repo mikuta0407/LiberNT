@@ -82,6 +82,8 @@ UCHAR IopQueryOperationLength[FileMaximumInformation] =
     0,
     0,
     sizeof(FILE_ID_INFORMATION),
+    [FileStatInformation] = sizeof(FILE_STAT_INFORMATION),
+    [FileStatLxInformation] = sizeof(FILE_STAT_LX_INFORMATION),
     [FileCaseSensitiveInformation] = sizeof(FILE_CASE_SENSITIVE_INFORMATION)
 };
 
@@ -131,6 +133,7 @@ UCHAR IopSetOperationLength[FileMaximumInformation] =
     sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
     0,
     sizeof(FILE_IO_PRIORITY_HINT_INFORMATION),
+    [FileDispositionInformationEx] = sizeof(FILE_DISPOSITION_INFORMATION_EX),
     [FileCaseSensitiveInformation] = sizeof(FILE_CASE_SENSITIVE_INFORMATION)
 };
 
@@ -178,6 +181,8 @@ ACCESS_MASK IopQueryOperationAccess[FileMaximumInformation] =
     0,
     0,
     0,
+    [FileStatInformation] = FILE_READ_ATTRIBUTES,
+    [FileStatLxInformation] = FILE_READ_ATTRIBUTES | FILE_READ_EA,
     [FileCaseSensitiveInformation] = FILE_READ_ATTRIBUTES
 };
 
@@ -225,13 +230,15 @@ ACCESS_MASK IopSetOperationAccess[FileMaximumInformation] =
     FILE_WRITE_DATA,
     DELETE,
     0,
+    [FileDispositionInformationEx] = DELETE,
     [FileCaseSensitiveInformation] = FILE_WRITE_ATTRIBUTES
 };
 
 //
 // Volume Information Classes
 //
-UCHAR IopQueryFsOperationLength[] =
+/* TODO: FileFsSectorSizeInformation, FileFsDataCopyInformation and FileFsMetadataSizeInformation are rejected as invalid classes */
+UCHAR IopQueryFsOperationLength[FileFsMaximumInformation] =
 {
     0,
     sizeof(FILE_FS_VOLUME_INFORMATION),
@@ -249,7 +256,7 @@ UCHAR IopQueryFsOperationLength[] =
     0xFF
 };
 
-UCHAR IopSetFsOperationLength[] =
+UCHAR IopSetFsOperationLength[FileFsMaximumInformation] =
 {
     0,
     0,
@@ -267,7 +274,7 @@ UCHAR IopSetFsOperationLength[] =
     0xFF
 };
 
-ULONG IopQueryFsOperationAccess[] =
+ULONG IopQueryFsOperationAccess[FileFsMaximumInformation] =
 {
     0,
     0,
@@ -285,7 +292,7 @@ ULONG IopQueryFsOperationAccess[] =
     0xFFFFFFFF
 };
 
-ULONG IopSetFsOperationAccess[] =
+ULONG IopSetFsOperationAccess[FileFsMaximumInformation] =
 {
     0,
     0,

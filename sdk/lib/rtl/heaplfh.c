@@ -28,11 +28,12 @@ typedef struct _RTLP_LFH_USER_BLOCK
     USHORT Bucket;
     USHORT SlotSize;
     ULONG SlotCount;
-    volatile LONG FreeCount;
     PHEAP Heap;
     LIST_ENTRY Link;
     DECLSPEC_ALIGN(8) volatile LONGLONG FreeState;
     PUCHAR FirstSlot;
+    struct _RTLP_LFH_USER_BLOCK *NextPartial;
+    volatile LONG Listed;
 } RTLP_LFH_USER_BLOCK, *PRTLP_LFH_USER_BLOCK;
 
 typedef union _RTLP_LFH_ENTRY_HEADER
@@ -51,7 +52,8 @@ typedef struct _RTLP_LFH_BUCKET
     LIST_ENTRY UserBlocks;
     ULONG BlockCount;
     PRTLP_LFH_USER_BLOCK volatile Active;
-    PRTLP_LFH_USER_BLOCK volatile Partial;
+    PRTLP_LFH_USER_BLOCK volatile PartialList;
+    PRTLP_LFH_USER_BLOCK Spare;
 } RTLP_LFH_BUCKET, *PRTLP_LFH_BUCKET;
 
 typedef struct _RTLP_LFH_HEAP
@@ -132,7 +134,7 @@ static
 LONGLONG
 RtlpLfhReadFreeState(PRTLP_LFH_USER_BLOCK Block)
 {
-    return InterlockedCompareExchange64(&Block->FreeState, 0, 0);
+    return ReadAcquire64(&Block->FreeState);
 }
 
 static
@@ -156,25 +158,25 @@ RtlpLfhReleaseEntry(PHEAP_ENTRY Entry)
     LONGLONG volatile *Word = (LONGLONG volatile *)&Entry->Size;
     RTLP_LFH_ENTRY_HEADER Old, New;
 
-    do
-    {
-        Old.Word = InterlockedCompareExchange64(Word, 0, 0);
-        if (!(Old.Bytes[RTLP_LFH_HEADER_FLAGS] & HEAP_ENTRY_BUSY))
-            return FALSE;
-        New = Old;
-        New.Bytes[RTLP_LFH_HEADER_FLAGS] = 0;
-        New.Bytes[RTLP_LFH_HEADER_UNUSED] = 0;
-    } while (InterlockedCompareExchange64(Word, New.Word, Old.Word) != Old.Word);
+    Old.Word = ReadNoFence64(Word);
+    if (!(Old.Bytes[RTLP_LFH_HEADER_FLAGS] & HEAP_ENTRY_BUSY))
+        return FALSE;
+    New = Old;
+    New.Bytes[RTLP_LFH_HEADER_FLAGS] = 0;
+    New.Bytes[RTLP_LFH_HEADER_UNUSED] = 0;
+    /* FIXME: two threads freeing the same block at once both pass this check; only a double free from one thread is rejected */
+    WriteNoFence64(Word, New.Word);
     return TRUE;
 }
 
 static
 PRTLP_LFH_USER_BLOCK
-RtlpLfhBlockFromEntry(PHEAP Heap, PHEAP_ENTRY Entry, PVOID Low, PVOID High)
+RtlpLfhBlockFromEntryIndex(PHEAP Heap, PHEAP_ENTRY Entry, PVOID Low, PVOID High, PULONG Index)
 {
     PRTLP_LFH_USER_BLOCK Block;
     ULONG_PTR Offset;
     SIZE_T Distance;
+    ULONG Slot;
 
     if (Entry->SegmentOffset != HEAP_LFH_INDEX)
         return NULL;
@@ -196,10 +198,22 @@ RtlpLfhBlockFromEntry(PHEAP Heap, PHEAP_ENTRY Entry, PVOID Low, PVOID High)
         return NULL;
 
     Distance = (PUCHAR)Entry - Block->FirstSlot;
-    if (Distance % Block->SlotSize || Distance / Block->SlotSize >= Block->SlotCount)
+    if (Distance > MAXULONG)
+        return NULL;
+    Slot = (ULONG)Distance / Block->SlotSize;
+    if (Slot * Block->SlotSize != (ULONG)Distance || Slot >= Block->SlotCount)
         return NULL;
 
+    if (Index)
+        *Index = Slot;
     return Block;
+}
+
+static
+PRTLP_LFH_USER_BLOCK
+RtlpLfhBlockFromEntry(PHEAP Heap, PHEAP_ENTRY Entry, PVOID Low, PVOID High)
+{
+    return RtlpLfhBlockFromEntryIndex(Heap, Entry, Low, High, NULL);
 }
 
 static
@@ -376,10 +390,11 @@ RtlpLfhCreateUserBlock(PHEAP Heap, ULONG Bucket, SIZE_T SlotSize)
     Block->Bucket = (USHORT)Bucket;
     Block->SlotSize = (USHORT)SlotSize;
     Block->SlotCount = (ULONG)Count;
-    Block->FreeCount = (LONG)Count;
     Block->Heap = Heap;
     Block->FirstSlot = (PUCHAR)Block + Header;
     Block->FreeState = 0;
+    Block->NextPartial = NULL;
+    Block->Listed = 0;
 
     for (Index = 0; Index < Count; ++Index)
     {
@@ -411,7 +426,6 @@ RtlpLfhPopSlot(PRTLP_LFH_USER_BLOCK Block, SIZE_T Size, ULONG Flags)
             return NULL;
         New = RtlpLfhNextFreeState(Old, *(volatile ULONG *)(RtlpLfhSlotEntry(Block, Head) + 1));
     } while (InterlockedCompareExchange64(&Block->FreeState, New, Old) != Old);
-    InterlockedDecrement(&Block->FreeCount);
 
     Entry = RtlpLfhSlotEntry(Block, Head);
     Entry->Flags = HEAP_ENTRY_BUSY | (UCHAR)((Flags & HEAP_SETTABLE_USER_FLAGS) >> 4);
@@ -421,29 +435,51 @@ RtlpLfhPopSlot(PRTLP_LFH_USER_BLOCK Block, SIZE_T Size, ULONG Flags)
 }
 
 static
+VOID
+RtlpLfhListPartial(PRTLP_LFH_BUCKET BucketData, PRTLP_LFH_USER_BLOCK Block)
+{
+    PRTLP_LFH_USER_BLOCK Head;
+
+    if (InterlockedCompareExchange(&Block->Listed, 1, 0))
+        return;
+    do
+    {
+        Head = ReadPointerAcquire((PVOID const volatile *)&BucketData->PartialList);
+        Block->NextPartial = Head;
+    } while (InterlockedCompareExchangePointer((PVOID volatile *)&BucketData->PartialList, Block, Head) != Head);
+}
+
+static
+PRTLP_LFH_USER_BLOCK
+RtlpLfhTakePartial(PRTLP_LFH_BUCKET BucketData)
+{
+    PRTLP_LFH_USER_BLOCK Block;
+
+    for (;;)
+    {
+        Block = BucketData->Spare;
+        if (!Block)
+            Block = InterlockedExchangePointer((PVOID volatile *)&BucketData->PartialList, NULL);
+        if (!Block)
+            return NULL;
+        BucketData->Spare = Block->NextPartial;
+        InterlockedExchange(&Block->Listed, 0);
+        if (RtlpLfhHasFreeSlot(Block))
+            return Block;
+    }
+}
+
+static
 BOOLEAN
 RtlpLfhRefill(PHEAP Heap, PRTLP_LFH_BUCKET BucketData, ULONG Bucket, SIZE_T SlotSize, PRTLP_LFH_USER_BLOCK Empty)
 {
     PRTLP_LFH_USER_BLOCK Block;
-    PLIST_ENTRY Link;
 
     RtlEnterHeapLock(Heap->LockVariable, TRUE);
     Block = BucketData->Active;
     if (Block == Empty)
     {
-        Block = BucketData->Partial;
-        if (!Block || !RtlpLfhHasFreeSlot(Block))
-        {
-            Block = NULL;
-            for (Link = BucketData->UserBlocks.Flink; Link != &BucketData->UserBlocks; Link = Link->Flink)
-            {
-                if (RtlpLfhHasFreeSlot(CONTAINING_RECORD(Link, RTLP_LFH_USER_BLOCK, Link)))
-                {
-                    Block = CONTAINING_RECORD(Link, RTLP_LFH_USER_BLOCK, Link);
-                    break;
-                }
-            }
-        }
+        Block = RtlpLfhTakePartial(BucketData);
 
         if (!Block)
         {
@@ -516,35 +552,47 @@ RtlpLfhAllocate(PHEAP Heap, ULONG Flags, SIZE_T Size)
 }
 
 PHEAP
-RtlpLfhOwner(PVOID Ptr)
+RtlpLfhLookup(PVOID Ptr, PRTLP_LFH_SLOT Slot)
 {
     PRTLP_LFH_USER_BLOCK Block;
+    ULONG Index;
 
     if (!Ptr || ((ULONG_PTR)Ptr & (HEAP_ENTRY_SIZE - 1)))
         return NULL;
     if (((PHEAP_ENTRY)Ptr - 1)->SegmentOffset != HEAP_LFH_INDEX)
         return NULL;
-    Block = RtlpLfhBlockFromEntry(NULL, (PHEAP_ENTRY)Ptr - 1, NULL, NULL);
-    return Block ? Block->Heap : NULL;
+    Block = RtlpLfhBlockFromEntryIndex(NULL, (PHEAP_ENTRY)Ptr - 1, NULL, NULL, &Index);
+    if (!Block)
+        return NULL;
+    if (Slot)
+    {
+        Slot->Block = Block;
+        Slot->Index = Index;
+    }
+    return Block->Heap;
+}
+
+PHEAP
+RtlpLfhOwner(PVOID Ptr)
+{
+    return RtlpLfhLookup(Ptr, NULL);
 }
 
 BOOLEAN
-RtlpLfhFree(PHEAP Heap, PVOID Ptr)
+RtlpLfhFree(PVOID Ptr, PRTLP_LFH_SLOT Slot)
 {
-    PRTLP_LFH_HEAP Lfh = Heap->FrontEndHeap;
-    PRTLP_LFH_USER_BLOCK Block;
+    PRTLP_LFH_USER_BLOCK Block = Slot->Block;
+    PRTLP_LFH_HEAP Lfh = Block->Heap->FrontEndHeap;
     PHEAP_ENTRY Entry = (PHEAP_ENTRY)Ptr - 1;
+    ULONG Index = Slot->Index;
     LONGLONG Old, New;
-    ULONG Index;
 
-    Block = RtlpLfhBlockFromEntry(Heap, Entry, NULL, NULL);
-    if (!Block || !RtlpLfhReleaseEntry(Entry))
+    if (!RtlpLfhReleaseEntry(Entry))
     {
         RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_INVALID_PARAMETER);
         return FALSE;
     }
 
-    Index = (ULONG)(((PUCHAR)Entry - Block->FirstSlot) / Block->SlotSize);
     do
     {
         Old = RtlpLfhReadFreeState(Block);
@@ -553,8 +601,8 @@ RtlpLfhFree(PHEAP Heap, PVOID Ptr)
     } while (InterlockedCompareExchange64(&Block->FreeState, New, Old) != Old);
 
     /* FIXME: emptied user blocks are kept until the heap is destroyed; releasing them needs safe reclamation */
-    if (InterlockedIncrement(&Block->FreeCount) == 1)
-        Lfh->Buckets[Block->Bucket].Partial = Block;
+    if ((ULONG)Old == RTLP_LFH_NO_SLOT)
+        RtlpLfhListPartial(&Lfh->Buckets[Block->Bucket], Block);
 
     return TRUE;
 }
@@ -592,6 +640,7 @@ PVOID
 RtlpLfhReAllocate(PHEAP Heap, ULONG Flags, PVOID Ptr, SIZE_T Size)
 {
     EXCEPTION_RECORD ExceptionRecord;
+    RTLP_LFH_SLOT Slot;
     SIZE_T OldSize;
     PVOID NewPtr;
 
@@ -625,7 +674,8 @@ RtlpLfhReAllocate(PHEAP Heap, ULONG Flags, PVOID Ptr, SIZE_T Size)
     if ((Flags & HEAP_ZERO_MEMORY) && Size > OldSize)
         RtlZeroMemory((PUCHAR)NewPtr + OldSize, Size - OldSize);
 
-    RtlpLfhFree(Heap, Ptr);
+    if (RtlpLfhLookup(Ptr, &Slot) == Heap)
+        RtlpLfhFree(Ptr, &Slot);
     return NewPtr;
 }
 

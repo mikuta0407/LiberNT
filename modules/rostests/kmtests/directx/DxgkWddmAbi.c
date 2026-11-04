@@ -104,10 +104,34 @@ TestAdapterStartRolePolicy(VOID)
     ok(!DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartRenderOnly, 0, 65, 64), "out-of-range GPU node count accepted\n");
 }
 
+static VOID
+TestVsyncControlDdiSelection(VOID)
+{
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, TRUE, TRUE, TRUE), DxgkVsyncControlInterrupt2);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(TRUE, TRUE, TRUE, TRUE), DxgkVsyncControlInterrupt3);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(TRUE, FALSE, TRUE, TRUE), DxgkVsyncControlInterrupt2);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, TRUE, FALSE, TRUE), DxgkVsyncControlInterrupt);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, FALSE, FALSE, TRUE), DxgkVsyncControlInterrupt);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(TRUE, FALSE, FALSE, FALSE), DxgkVsyncControlNone);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, TRUE, FALSE, FALSE), DxgkVsyncControlNone);
+}
+
+static VOID
+TestVsyncControlStatus(VOID)
+{
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_NOT_IMPLEMENTED), STATUS_SUCCESS);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_SUCCESS), STATUS_SUCCESS);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_NOT_SUPPORTED), STATUS_NOT_SUPPORTED);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_INVALID_PARAMETER), STATUS_INVALID_PARAMETER);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_DEVICE_REMOVED), STATUS_DEVICE_REMOVED);
+}
+
 START_TEST(DxgkWddmAbi)
 {
     TestMapMemoryContractCore();
     TestAdapterStartRolePolicy();
+    TestVsyncControlDdiSelection();
+    TestVsyncControlStatus();
 
     ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_4, 0x9006);
     ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_5, 0xA00B);

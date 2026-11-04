@@ -26,8 +26,8 @@
 @ stdcall CloseServiceHandle(long) advapi32.CloseServiceHandle
 @ stdcall CloseTrace(int64)
 @ stdcall ControlService(long long ptr) advapi32.ControlService
-@ stub ControlServiceExA
-@ stub ControlServiceExW
+@ stdcall ControlServiceExA(long long long ptr) advapi32.ControlServiceExA
+@ stdcall ControlServiceExW(long long long ptr) advapi32.ControlServiceExW
 @ stdcall ControlTraceA(int64 str ptr long) advapi32.ControlTraceA
 @ stdcall ControlTraceW(int64 wstr ptr long) advapi32.ControlTraceW
 @ stub ConvertSDToStringSDRootDomainW
@@ -157,8 +157,8 @@
 @ stdcall LsaSetInformationPolicy(long long ptr) advapi32.LsaSetInformationPolicy
 @ stdcall LsaSetSecret(ptr ptr ptr) advapi32.LsaSetSecret
 @ stdcall LsaStorePrivateData(ptr ptr ptr) advapi32.LsaStorePrivateData
-@ stub NotifyServiceStatusChange
-@ stub NotifyServiceStatusChangeA
+@ stdcall NotifyServiceStatusChange(ptr long ptr) NotifyServiceStatusChangeW
+@ stdcall NotifyServiceStatusChangeA(ptr long ptr)
 @ stdcall NotifyServiceStatusChangeW(ptr long ptr)
 @ stdcall OpenSCManagerA(str str long) advapi32.OpenSCManagerA
 @ stdcall OpenSCManagerW(wstr wstr long) advapi32.OpenSCManagerW

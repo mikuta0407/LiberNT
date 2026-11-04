@@ -4,6 +4,7 @@
  * PURPOSE:     Pure adapter-start role policy shared with kernel tests
  */
 
+#include <ntddk.h>
 #include "adapter_start_core.h"
 
 DXGK_ADAPTER_START_ROLE
@@ -46,4 +47,28 @@ DxgkAdapterStartRoleHasValidCounts(
     if (Role == DxgkAdapterStartRenderOnly)
         return NumberOfVideoPresentSources == 0 && NodeCount != 0;
     return FALSE;
+}
+
+DXGK_VSYNC_CONTROL_DDI
+DxgkAdapterStartVsyncControlDdi(
+    _In_ BOOLEAN IndependentVidPnVSyncControl,
+    _In_ BOOLEAN HasControlInterrupt3,
+    _In_ BOOLEAN HasControlInterrupt2,
+    _In_ BOOLEAN HasControlInterrupt)
+{
+    if (IndependentVidPnVSyncControl && HasControlInterrupt3)
+        return DxgkVsyncControlInterrupt3;
+    if (HasControlInterrupt2)
+        return DxgkVsyncControlInterrupt2;
+    if (HasControlInterrupt)
+        return DxgkVsyncControlInterrupt;
+    return DxgkVsyncControlNone;
+}
+
+NTSTATUS
+DxgkAdapterStartVsyncControlStatus(
+    _In_ NTSTATUS MiniportStatus)
+{
+    /* Windows VidSch records the new vsync state when the miniport answers STATUS_NOT_IMPLEMENTED. */
+    return MiniportStatus == STATUS_NOT_IMPLEMENTED ? STATUS_SUCCESS : MiniportStatus;
 }

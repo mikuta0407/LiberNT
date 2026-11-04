@@ -84,6 +84,47 @@ DxgkGpuVaCoreNextMapPiece(
     _Out_ PULONGLONG PieceEnd,
     _Out_ PULONG CoveringSpan);
 
+#define DXGK_GPUVA_CORE_UPDATE_CPU_VIRTUAL   0
+#define DXGK_GPUVA_CORE_UPDATE_GPU_VIRTUAL   1
+#define DXGK_GPUVA_CORE_UPDATE_GPU_PHYSICAL  2
+
+typedef enum _DXGK_GPUVA_64KB_ENTRIES
+{
+    DxgkGpuVa64KBEntriesNone = 0,
+    DxgkGpuVa64KBEntriesZeroPte,
+    DxgkGpuVa64KBEntriesTableHalf
+} DXGK_GPUVA_64KB_ENTRIES;
+
+DXGK_GPUVA_64KB_ENTRIES
+DxgkGpuVaCore64KBEntries(
+    _In_ BOOLEAN DualPteSupported,
+    _In_ ULONG PageTableLevel,
+    _In_ BOOLEAN Repeat);
+
+BOOLEAN
+DxgkGpuVaCoreNextWriteRun(
+    _In_reads_(Count * 2) const ULONGLONG *Entries,
+    _In_reads_opt_(Count * 2) const ULONGLONG *Entries64KB,
+    _In_ ULONG Count,
+    _In_ BOOLEAN ZeroFilled,
+    _Inout_ PULONG Cursor,
+    _Out_ PULONG RunLength);
+
+ULONG
+DxgkGpuVaCoreTableUpdateMode(
+    _In_ ULONG AdapterUpdateMode,
+    _In_ BOOLEAN HasPagingVa,
+    _In_ BOOLEAN PagingProcessInit);
+
+BOOLEAN
+DxgkGpuVaCoreTableNeedsCpuMapping(
+    _In_ ULONG AdapterUpdateMode,
+    _In_ BOOLEAN PagingProcessTable);
+
+BOOLEAN
+DxgkGpuVaCoreUsesPagingProcessVa(
+    _In_ ULONG AdapterUpdateMode);
+
 /* --- page-table geometry --------------------------------------------- */
 
 NTSTATUS DxgkGpuVaCoreValidateGeometry(_In_ const DXGK_GPUVA_GEOMETRY *Geometry);
