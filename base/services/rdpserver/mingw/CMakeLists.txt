@@ -17,5 +17,5 @@ target_compile_definitions(rdpserver PRIVATE __STDC_NO_THREADS__=1 WINVER=0x0601
 if(MINGW)
     target_compile_options(rdpserver PRIVATE -Wall -Wextra -Wno-deprecated-declarations)
 endif()
-target_link_libraries(rdpserver PRIVATE freerdp-server freerdp winpr OpenSSL::Crypto ws2_32 gdi32 user32 advapi32)
+target_link_libraries(rdpserver PRIVATE freerdp-server freerdp winpr OpenSSL::Crypto ws2_32 gdi32 user32 advapi32 winmm)
 install(TARGETS rdpserver RUNTIME DESTINATION bin)
