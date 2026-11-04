@@ -7584,9 +7584,10 @@ DxgkVidPnQueryMonitorPreferredMode(
     _Out_ PULONG RefreshRate)
 {
     PDXGKP_MONITOR_SOURCE_MODESET MonitorSet;
-    CONST D3DKMDT_VIDEO_SIGNAL_INFO *Signal = NULL;
+    PDXGKP_VIDPN_TARGET_MODESET TargetSet;
+    CONST D3DKMDT_VIDEO_SIGNAL_INFO *Signal = NULL, *Target;
     PDXGKP_VIDPN VidPn;
-    ULONG TargetIndex;
+    ULONG TargetIndex, Wanted, Rate, Distance, BestDistance = MAXULONG;
     SIZE_T Index;
 
     *Width = *Height = *RefreshRate = 0;
@@ -7614,6 +7615,25 @@ DxgkVidPnQueryMonitorPreferredMode(
             *RefreshRate = (ULONG)(((ULONGLONG)Signal->VSyncFreq.Numerator +
                                     Signal->VSyncFreq.Denominator / 2) /
                                    Signal->VSyncFreq.Denominator);
+            /* The registry mode must be one of the GDI modes, which take the target mode's integer rate. */
+            Wanted = *RefreshRate;
+            TargetSet = TargetIndex != MAXULONG ? VidPn->TargetModeSets[TargetIndex] : NULL;
+            for (Index = 0; TargetSet != NULL && Index < TargetSet->NumModes; Index++)
+            {
+                Target = &TargetSet->Modes[Index].VideoSignalInfo;
+                if (Target->ActiveSize.cx != Signal->ActiveSize.cx || Target->ActiveSize.cy != Signal->ActiveSize.cy ||
+                    !DxgkpIsRefreshRateSpecified(&Target->VSyncFreq))
+                    continue;
+                Rate = Target->VSyncFreq.Numerator / Target->VSyncFreq.Denominator;
+                Distance = Rate > Wanted ? Rate - Wanted : Wanted - Rate;
+                if (Distance < BestDistance)
+                {
+                    BestDistance = Distance;
+                    *RefreshRate = Rate;
+                    if (Distance == 0)
+                        break;
+                }
+            }
         }
     }
     KeReleaseMutex(&Adapter->VidPnMutex, FALSE);
