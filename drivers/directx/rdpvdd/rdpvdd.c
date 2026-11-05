@@ -8,6 +8,7 @@
 #include <ntddk.h>
 #include <windef.h>
 #include <dispmprt.h>
+#include <drivers/directx/rdpvdd.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -28,11 +29,14 @@ typedef struct _RDPVDD_ADAPTER
     DEVICE_POWER_STATE AdapterPowerState;
     DEVICE_POWER_STATE MonitorPowerState;
     BOOLEAN Started;
+    BOOLEAN Connected;
     BOOLEAN SourceActive;
     BOOLEAN SourceVisible;
     ULONG Width;
     ULONG Height;
     ULONG Pitch;
+    ULONG PreferredWidth;
+    ULONG PreferredHeight;
     PUCHAR Scanout;
     SIZE_T ScanoutSize;
 } RDPVDD_ADAPTER, *PRDPVDD_ADAPTER;
@@ -53,8 +57,11 @@ RdpVddIsSupportedSourceMode(
         return FALSE;
     if (Mode->Format.Graphics.PixelValueAccessMode != D3DKMDT_PVAM_DIRECT)
         return FALSE;
-    return Mode->Format.Graphics.PrimSurfSize.cx == Adapter->Width &&
-           Mode->Format.Graphics.PrimSurfSize.cy == Adapter->Height;
+    UNREFERENCED_PARAMETER(Adapter);
+    return Mode->Format.Graphics.PrimSurfSize.cx >= RDPVDD_MIN_WIDTH &&
+           Mode->Format.Graphics.PrimSurfSize.cx <= RDPVDD_MAX_WIDTH &&
+           Mode->Format.Graphics.PrimSurfSize.cy >= RDPVDD_MIN_HEIGHT &&
+           Mode->Format.Graphics.PrimSurfSize.cy <= RDPVDD_MAX_HEIGHT;
 }
 
 static
@@ -168,9 +175,8 @@ RdpVddDdiStartDevice(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    /* TODO: Follow the RDP client resolution at run time instead of the fixed initial mode. */
-    Adapter->Width = RDPVDD_DEFAULT_WIDTH;
-    Adapter->Height = RDPVDD_DEFAULT_HEIGHT;
+    Adapter->Width = Adapter->PreferredWidth = RDPVDD_DEFAULT_WIDTH;
+    Adapter->Height = Adapter->PreferredHeight = RDPVDD_DEFAULT_HEIGHT;
     Adapter->Pitch = RDPVDD_DEFAULT_WIDTH * RDPVDD_BYTES_PER_PIXEL;
     Adapter->ScanoutSize = (SIZE_T)Adapter->Pitch * Adapter->Height;
     Adapter->Scanout = ExAllocatePoolWithTag(NonPagedPool, Adapter->ScanoutSize, RDPVDD_POOL_TAG);
@@ -180,6 +186,7 @@ RdpVddDdiStartDevice(
 
     Adapter->SourceActive = FALSE;
     Adapter->SourceVisible = FALSE;
+    Adapter->Connected = TRUE;
     Adapter->Started = TRUE;
     *NumberOfVideoPresentSources = RDPVDD_SOURCE_COUNT;
     *NumberOfChildren = RDPVDD_CHILD_COUNT;
@@ -302,7 +309,7 @@ RdpVddDdiQueryChildStatus(
     switch (ChildStatus->Type)
     {
         case StatusConnection:
-            ChildStatus->HotPlug.Connected = Adapter->Started;
+            ChildStatus->HotPlug.Connected = Adapter->Started && Adapter->Connected;
             return STATUS_SUCCESS;
 
         case StatusRotation:
@@ -440,6 +447,57 @@ RdpVddDdiSetPointerShape(
 
 static
 NTSTATUS
+RdpVddIndicateConnection(
+    _In_ PRDPVDD_ADAPTER Adapter,
+    _In_ BOOLEAN Connected)
+{
+    DXGK_CHILD_STATUS ChildStatus;
+
+    Adapter->Connected = Connected;
+    RtlZeroMemory(&ChildStatus, sizeof(ChildStatus));
+    ChildStatus.Type = StatusConnection;
+    ChildStatus.ChildUid = 0;
+    ChildStatus.HotPlug.Connected = Connected;
+    return Adapter->DxgkInterface.DxgkCbIndicateChildStatus(Adapter->DxgkInterface.DeviceHandle, &ChildStatus);
+}
+
+static
+NTSTATUS
+APIENTRY
+RdpVddDdiEscape(
+    IN_CONST_HANDLE hAdapter,
+    IN_CONST_PDXGKARG_ESCAPE pEscape)
+{
+    PRDPVDD_ADAPTER Adapter = (PRDPVDD_ADAPTER)hAdapter;
+    RDPVDD_ESCAPE Request;
+    NTSTATUS Status;
+
+    if (pEscape->pPrivateDriverData == NULL || pEscape->PrivateDriverDataSize != sizeof(Request))
+        return STATUS_INVALID_PARAMETER;
+    RtlCopyMemory(&Request, pEscape->pPrivateDriverData, sizeof(Request));
+    if (Request.Code != RDPVDD_ESCAPE_SET_MODE)
+        return STATUS_NOT_SUPPORTED;
+    if (Request.Width < RDPVDD_MIN_WIDTH || Request.Width > RDPVDD_MAX_WIDTH ||
+        Request.Height < RDPVDD_MIN_HEIGHT || Request.Height > RDPVDD_MAX_HEIGHT)
+        return STATUS_INVALID_PARAMETER;
+    if (!Adapter->Started)
+        return STATUS_DEVICE_NOT_READY;
+    if (Request.Width == Adapter->PreferredWidth && Request.Height == Adapter->PreferredHeight)
+        return STATUS_SUCCESS;
+
+    Status = RdpVddIndicateConnection(Adapter, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        Adapter->Connected = TRUE;
+        return Status;
+    }
+    Adapter->PreferredWidth = Request.Width;
+    Adapter->PreferredHeight = Request.Height;
+    return RdpVddIndicateConnection(Adapter, TRUE);
+}
+
+static
+NTSTATUS
 RdpVddIsPinnedSourceModeSupported(
     _In_ PRDPVDD_ADAPTER Adapter,
     _In_ D3DKMDT_HVIDPN hVidPn,
@@ -567,10 +625,10 @@ RdpVddAddSourceModes(
     if (NT_SUCCESS(Status))
     {
         Mode->Type = D3DKMDT_RMT_GRAPHICS;
-        Mode->Format.Graphics.PrimSurfSize.cx = Adapter->Width;
-        Mode->Format.Graphics.PrimSurfSize.cy = Adapter->Height;
+        Mode->Format.Graphics.PrimSurfSize.cx = Adapter->PreferredWidth;
+        Mode->Format.Graphics.PrimSurfSize.cy = Adapter->PreferredHeight;
         Mode->Format.Graphics.VisibleRegionSize = Mode->Format.Graphics.PrimSurfSize;
-        Mode->Format.Graphics.Stride = Adapter->Pitch;
+        Mode->Format.Graphics.Stride = Adapter->PreferredWidth * RDPVDD_BYTES_PER_PIXEL;
         Mode->Format.Graphics.PixelFormat = D3DDDIFMT_A8R8G8B8;
         Mode->Format.Graphics.ColorBasis = D3DKMDT_CB_SCRGB;
         Mode->Format.Graphics.PixelValueAccessMode = D3DKMDT_PVAM_DIRECT;
@@ -609,8 +667,8 @@ RdpVddAddTargetModes(
     if (NT_SUCCESS(Status))
     {
         Mode->VideoSignalInfo.VideoStandard = D3DKMDT_VSS_OTHER;
-        Mode->VideoSignalInfo.TotalSize.cx = Adapter->Width;
-        Mode->VideoSignalInfo.TotalSize.cy = Adapter->Height;
+        Mode->VideoSignalInfo.TotalSize.cx = Adapter->PreferredWidth;
+        Mode->VideoSignalInfo.TotalSize.cy = Adapter->PreferredHeight;
         Mode->VideoSignalInfo.ActiveSize = Mode->VideoSignalInfo.TotalSize;
         Mode->VideoSignalInfo.VSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
         Mode->VideoSignalInfo.VSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
@@ -836,6 +894,7 @@ RdpVddDdiCommitVidPn(
     const D3DKMDT_VIDPN_SOURCE_MODE *PinnedMode = NULL;
     D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId;
     SIZE_T NumPaths;
+    ULONG Width = 0, Height = 0;
     NTSTATUS Status;
 
     if (pCommitVidPn->Flags.PathPoweredOff)
@@ -870,6 +929,8 @@ RdpVddDdiCommitVidPn(
     {
         if (!RdpVddIsSupportedSourceMode(Adapter, PinnedMode))
             Status = STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE_MODE;
+        Width = PinnedMode->Format.Graphics.PrimSurfSize.cx;
+        Height = PinnedMode->Format.Graphics.PrimSurfSize.cy;
         (VOID)SourceModeSetInterface->pfnReleaseModeInfo(hSourceModeSet, PinnedMode);
     }
     (VOID)VidPnInterface->pfnReleaseSourceModeSet(pCommitVidPn->hFunctionalVidPn, hSourceModeSet);
@@ -879,6 +940,24 @@ RdpVddDdiCommitVidPn(
     Status = RdpVddCommitPaths(Adapter, SourceId, hTopology, TopologyInterface);
     if (!NT_SUCCESS(Status))
         return Status;
+
+    if (Width != Adapter->Width || Height != Adapter->Height)
+    {
+        PUCHAR Scanout, OldScanout;
+        SIZE_T ScanoutSize = (SIZE_T)Width * RDPVDD_BYTES_PER_PIXEL * Height;
+
+        Scanout = ExAllocatePoolWithTag(NonPagedPool, ScanoutSize, RDPVDD_POOL_TAG);
+        if (Scanout == NULL)
+            return STATUS_NO_MEMORY;
+        OldScanout = Adapter->Scanout;
+        Adapter->Scanout = Scanout;
+        Adapter->ScanoutSize = ScanoutSize;
+        Adapter->Width = Width;
+        Adapter->Height = Height;
+        Adapter->Pitch = Width * RDPVDD_BYTES_PER_PIXEL;
+        if (OldScanout != NULL)
+            ExFreePoolWithTag(OldScanout, RDPVDD_POOL_TAG);
+    }
 
     RdpVddBlackOut(Adapter);
     Adapter->SourceActive = TRUE;
@@ -913,8 +992,8 @@ RdpVddDdiRecommendMonitorModes(
         return Status;
 
     Mode->VideoSignalInfo.VideoStandard = D3DKMDT_VSS_OTHER;
-    Mode->VideoSignalInfo.TotalSize.cx = Adapter->Width;
-    Mode->VideoSignalInfo.TotalSize.cy = Adapter->Height;
+    Mode->VideoSignalInfo.TotalSize.cx = Adapter->PreferredWidth;
+    Mode->VideoSignalInfo.TotalSize.cy = Adapter->PreferredHeight;
     Mode->VideoSignalInfo.ActiveSize = Mode->VideoSignalInfo.TotalSize;
     Mode->VideoSignalInfo.VSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
     Mode->VideoSignalInfo.VSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
@@ -1076,6 +1155,7 @@ DriverEntry(
     InitData.DxgkDdiQueryAdapterInfo = RdpVddDdiQueryAdapterInfo;
     InitData.DxgkDdiSetPointerPosition = RdpVddDdiSetPointerPosition;
     InitData.DxgkDdiSetPointerShape = RdpVddDdiSetPointerShape;
+    InitData.DxgkDdiEscape = RdpVddDdiEscape;
     InitData.DxgkDdiIsSupportedVidPn = RdpVddDdiIsSupportedVidPn;
     InitData.DxgkDdiRecommendFunctionalVidPn = RdpVddDdiRecommendFunctionalVidPn;
     InitData.DxgkDdiEnumVidPnCofuncModality = RdpVddDdiEnumVidPnCofuncModality;
