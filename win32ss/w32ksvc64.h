@@ -894,3 +894,4 @@
     SVC_(DCompositionProcessChannelBatchBuffer, 4)
     SVC_(DCompositionCommitChannel, 8)
     SVC_(UserGetUpdatedClipboardFormats, 3)
+    SVC_(UserSetDisplayConfig, 5)
