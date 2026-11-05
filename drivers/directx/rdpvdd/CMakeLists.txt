@@ -1,6 +1,6 @@
 # PROJECT:  LiberNT Remote Display Miniport
 # LICENSE:  GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
-# PURPOSE:  Build file for rdpvdd.sys, a root-enumerated WDDM display-only miniport
+# PURPOSE:  Build file for rdpvdd.sys, the WDDM display-only miniport of the remote display
 
 remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT})
 remove_definitions(-DWINVER=${REACTOS_TARGET_NT})
@@ -15,4 +15,3 @@ target_link_libraries(rdpvdd displib)
 add_importlibs(rdpvdd ntoskrnl hal)
 add_cd_file(TARGET rdpvdd DESTINATION reactos/system32/drivers FOR all)
 add_driver_inf(rdpvdd rdpvdd.inf)
-add_registry_inf(rdpvdd_reg.inf)

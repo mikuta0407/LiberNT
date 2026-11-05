@@ -15,7 +15,7 @@ DefaultDestDir=12
 %StdMfg%=StdMfg
 
 [StdMfg]
-%RdpVdd.DeviceDesc%=RdpVdd_Install,ROOT\RDPVDD
+%RdpVdd.DeviceDesc%=RdpVdd_Install,RdpVdd_RemoteDisplay
 
 [RdpVdd_Install]
 AddReg=RdpVdd_SoftwareSettings

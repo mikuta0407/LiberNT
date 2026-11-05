@@ -1,7 +1,7 @@
 /*
  * PROJECT:     LiberNT Remote Display Miniport
  * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
- * PURPOSE:     Root-enumerated WDDM display-only miniport with a system memory scanout
+ * PURPOSE:     WDDM display-only miniport of the remote display with a system memory scanout
  * COPYRIGHT:   Copyright 2026 mikuta0407 <mikuta0407@mikuta0407.net>
  */
 
@@ -222,6 +222,23 @@ RdpVddDdiRemoveDevice(
     return STATUS_SUCCESS;
 }
 
+static DXGKDDI_NOTIFY_SURPRISE_REMOVAL RdpVddDdiNotifySurpriseRemoval;
+
+static
+NTSTATUS
+RdpVddDdiNotifySurpriseRemoval(
+    _In_ PVOID MiniportDeviceContext,
+    _In_ DXGK_SURPRISE_REMOVAL_TYPE RemovalType)
+{
+    PRDPVDD_ADAPTER Adapter = MiniportDeviceContext;
+
+    UNREFERENCED_PARAMETER(RemovalType);
+
+    Adapter->Started = FALSE;
+    Adapter->SourceActive = FALSE;
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 APIENTRY
@@ -377,6 +394,7 @@ RdpVddDdiQueryAdapterInfo(
             Caps->WDDMVersion = DXGKDDI_WDDMv2;
             Caps->HighestAcceptableAddress.QuadPart = -1;
             Caps->SupportNonVGA = TRUE;
+            Caps->SupportSurpriseRemoval = TRUE;
             return STATUS_SUCCESS;
         }
 
@@ -1070,6 +1088,7 @@ DriverEntry(
     InitData.DxgkDdiStopDeviceAndReleasePostDisplayOwnership = RdpVddDdiStopDeviceAndReleasePostDisplayOwnership;
     InitData.DxgkDdiSystemDisplayEnable = RdpVddDdiSystemDisplayEnable;
     InitData.DxgkDdiSystemDisplayWrite = RdpVddDdiSystemDisplayWrite;
+    InitData.DxgkDdiNotifySurpriseRemoval = RdpVddDdiNotifySurpriseRemoval;
 
     return DxgkInitializeDisplayOnlyDriver(DriverObject, RegistryPath, &InitData);
 }
