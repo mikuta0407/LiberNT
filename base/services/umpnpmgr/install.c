@@ -430,6 +430,25 @@ SetupInstalledDevice(
 }
 
 
+static
+BOOL
+IsSilentInstallDevice(
+    _In_ PCWSTR DeviceInstance)
+{
+    DWORD Capabilities = 0, Size = sizeof(Capabilities), Type;
+    HKEY hKey;
+
+    if (RegOpenKeyExW(hEnumKey, DeviceInstance, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(hKey, L"Capabilities", NULL, &Type, (LPBYTE)&Capabilities, &Size) != ERROR_SUCCESS ||
+        Type != REG_DWORD)
+    {
+        Capabilities = 0;
+    }
+    RegCloseKey(hKey);
+    return (Capabilities & CM_DEVCAP_SILENTINSTALL) != 0;
+}
+
 static BOOL
 InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
 {
@@ -1604,7 +1623,7 @@ Step2:
         {
             PLIST_ENTRY e = RemoveHeadList(&LocalBurst);
             Params = CONTAINING_RECORD(e, DeviceInstallParams, ListEntry);
-            InstallDevice(Params->DeviceIds, burstShowWizard);
+            InstallDevice(Params->DeviceIds, burstShowWizard && !IsSilentInstallDevice(Params->DeviceIds));
             HeapFree(GetProcessHeap(), 0, Params);
         }
     }
