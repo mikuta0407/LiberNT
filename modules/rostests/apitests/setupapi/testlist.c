@@ -11,6 +11,7 @@ extern void func_SetupInstallServicesFromInfSectionEx(void);
 extern void func_SetupCommitFileQueue(void);
 extern void func_SetupDiInstallClassExA(void);
 extern void func_SetupInstallFile(void);
+extern void func_SwDevice(void);
 extern void func_UsbInterfaceIds(void);
 
 const struct test winetest_testlist[] =
@@ -24,6 +25,7 @@ const struct test winetest_testlist[] =
     { "SetupCommitFileQueue", func_SetupCommitFileQueue },
     { "SetupDiInstallClassExA", func_SetupDiInstallClassExA},
     { "SetupInstallFile", func_SetupInstallFile },
+    { "SwDevice", func_SwDevice },
     { "UsbInterfaceIds", func_UsbInterfaceIds },
     { 0, 0 }
 };
