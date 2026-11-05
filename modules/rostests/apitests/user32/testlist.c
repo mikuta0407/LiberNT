@@ -16,6 +16,7 @@ extern void func_CursorPresentation(void);
 extern void func_CreateDialog(void);
 extern void func_DisplayChangeBroadcast(void);
 extern void func_DisplayDeviceAttach(void);
+extern void func_DisplayClone(void);
 extern void func_DisplayDeviceRemoval(void);
 extern void func_RemoteDisplayAdapter(void);
 extern void func_CreateIconFromResourceEx(void);
@@ -143,6 +144,7 @@ const struct test winetest_testlist[] =
     { "CreateDialog", func_CreateDialog },
     { "DisplayChangeBroadcast", func_DisplayChangeBroadcast },
     { "DisplayDeviceAttach", func_DisplayDeviceAttach },
+    { "DisplayClone", func_DisplayClone },
     { "DisplayDeviceRemoval", func_DisplayDeviceRemoval },
     { "RemoteDisplayAdapter", func_RemoteDisplayAdapter },
     { "CreateIconFromResourceEx", func_CreateIconFromResourceEx },
