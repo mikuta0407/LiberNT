@@ -277,6 +277,11 @@ EngpGraphicsDeviceNotification(
     UserEnterExclusive();
     EngAcquireSemaphore(ghsemGraphicsDeviceList);
     pGraphicsDevice = pNotify->pGraphicsDevice;
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+    if (pGraphicsDevice)
+        UserDetachCloneTarget(pGraphicsDevice);
+    EngAcquireSemaphore(ghsemGraphicsDeviceList);
+    pGraphicsDevice = pNotify->pGraphicsDevice;
     /* TODO: remove a device that is attached to the desktop */
     if (pGraphicsDevice &&
         !(pGraphicsDevice->StateFlags & (DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE)) &&
