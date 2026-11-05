@@ -556,9 +556,7 @@ UserEnumDisplaySettings(
 
     /* Ask GDI for the GRAPHICS_DEVICE */
     pGraphicsDevice = UserFindDisplaySettingsDevice(pustrDevice);
-    ppdev = EngpGetPDEV(pustrDevice);
-
-    if (!pGraphicsDevice || !ppdev)
+    if (!pGraphicsDevice)
     {
         /* No device found */
         ERR("No device found!\n");
@@ -568,9 +566,18 @@ UserEnumDisplaySettings(
     /* let's politely ask the driver for an updated mode list,
        just in case there's something new in there (vbox) */
 
-    if (iModeNum == 0)
-        PDEVOBJ_vRefreshModeList(ppdev);
-    PDEVOBJ_vRelease(ppdev);
+    ppdev = EngpGetPDEV(pustrDevice);
+    if (ppdev)
+    {
+        if (iModeNum == 0)
+            PDEVOBJ_vRefreshModeList(ppdev);
+        PDEVOBJ_vRelease(ppdev);
+    }
+    else if (!(iModeNum == 0 ? PDEVOBJ_bRefreshGraphicsDeviceModes(pGraphicsDevice) :
+                                LDEVOBJ_bBuildDevmodeList(pGraphicsDevice)))
+    {
+        return STATUS_INVALID_PARAMETER_2;
+    }
 
     iFoundMode = 0;
     for (i = 0; i < pGraphicsDevice->cDevModes; i++)
@@ -863,8 +870,20 @@ UserChangeDisplaySettings(
     ppdev = EngpGetPDEV(pustrDevice);
     if (!ppdev)
     {
-        ERR("Failed to get PDEV\n");
-        return DISP_CHANGE_BADPARAM;
+        if (!pustrDevice || !EngpFindGraphicsDevice(pustrDevice, 0))
+        {
+            ERR("Failed to get PDEV\n");
+            return DISP_CHANGE_BADPARAM;
+        }
+
+        /* A device off the desktop has no source to change, only a staged detach succeeds */
+        if ((flags & (CDS_UPDATEREGISTRY | CDS_NORESET)) == (CDS_UPDATEREGISTRY | CDS_NORESET) &&
+            (dm.dmFields & DM_POSITION) && dm.dmPelsWidth == 0 && dm.dmPelsHeight == 0)
+        {
+            return DISP_CHANGE_SUCCESSFUL;
+        }
+        /* TODO: attach a detached device to an extended desktop */
+        return DISP_CHANGE_FAILED;
     }
 
     /* Fixup values */
