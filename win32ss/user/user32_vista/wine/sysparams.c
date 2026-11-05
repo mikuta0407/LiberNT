@@ -16,6 +16,14 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(win);
 
+LONG APIENTRY
+NtUserSetDisplayConfig(
+    UINT32 numPathArrayElements,
+    DISPLAYCONFIG_PATH_INFO *pathArray,
+    UINT32 numModeInfoArrayElements,
+    DISPLAYCONFIG_MODE_INFO *modeInfoArray,
+    UINT32 flags);
+
 /* Only define DISPLAYCONFIG types locally when system headers do not provide them. */
 #if (WINVER < 0x601)
 typedef enum DISPLAYCONFIG_TOPOLOGY_ID
@@ -282,6 +290,7 @@ DisplayConfigCollectPaths(
         Device.cb = sizeof(Device);
         if (!EnumDisplayDevicesW(NULL, Index, &Device, 0))
             break;
+        /* TODO: report the paths of the clone targets of a source */
         if (!(Device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) ||
             (Device.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER))
             continue;
@@ -847,7 +856,9 @@ LONG WINAPI SetDisplayConfig(UINT32 path_info_count, DISPLAYCONFIG_PATH_INFO *pa
     {
         if (!(flags & SDC_TOPOLOGY_SUPPLIED) && (path_info_count || path_info || mode_info_count || mode_info))
             return ERROR_INVALID_PARAMETER;
-        return ERROR_SUCCESS;
+        if (flags & SDC_TOPOLOGY_SUPPLIED)
+            return ERROR_SUCCESS;
+        return NtUserSetDisplayConfig(0, NULL, 0, NULL, flags);
     }
 
     if (!path_info_count || !path_info || (mode_info_count && !mode_info))
