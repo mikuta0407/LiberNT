@@ -21,6 +21,7 @@ list(APPEND SOURCE
     DisplayClone.c
     DisplayDeviceRemoval.c
     RemoteDisplayAdapter.c
+    RemoteDisplayFrame.c
     CreateIconFromResourceEx.c
     CoveredWindow.c
     CreateWindowEx.c
