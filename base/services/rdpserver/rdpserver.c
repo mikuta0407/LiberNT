@@ -172,17 +172,36 @@ static BOOL UnicodeKeyboard(rdpInput *input, UINT16 flags, UINT16 code)
     return SendInput(1, &event, sizeof(event)) == 1;
 }
 
+static void LetterboxView(int sourceWidth, int sourceHeight, int width, int height, RECT *view)
+{
+    LONG cx = width, cy = height;
+    if ((LONGLONG)width * sourceHeight > (LONGLONG)height * sourceWidth)
+        cx = (LONG)((LONGLONG)sourceWidth * height / sourceHeight);
+    else
+        cy = (LONG)((LONGLONG)sourceHeight * width / sourceWidth);
+    view->left = (width - cx) / 2;
+    view->top = (height - cy) / 2;
+    view->right = view->left + cx;
+    view->bottom = view->top + cy;
+}
+
 static BOOL Mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
 {
     DESKTOP_CONTEXT *ctx = (DESKTOP_CONTEXT *)input->context;
     INPUT event = {0};
     BOOL down = (flags & PTR_FLAGS_DOWN) != 0;
-    if (!InputReady(input)) return FALSE;
+    int desktopWidth = GetSystemMetrics(SM_CXSCREEN), desktopHeight = GetSystemMetrics(SM_CYSCREEN);
+    RECT view;
+    LONG px, py;
+    if (!InputReady(input) || desktopWidth < 2 || desktopHeight < 2) return FALSE;
     event.type = INPUT_MOUSE;
-    if (x >= ctx->Width) x = ctx->Width - 1;
-    if (y >= ctx->Height) y = ctx->Height - 1;
-    event.mi.dx = MulDiv(x, 65535, ctx->Width - 1);
-    event.mi.dy = MulDiv(y, 65535, ctx->Height - 1);
+    LetterboxView(desktopWidth, desktopHeight, ctx->Width, ctx->Height, &view);
+    px = min(max((LONG)x, view.left), view.right - 1);
+    py = min(max((LONG)y, view.top), view.bottom - 1);
+    px = (LONG)((LONGLONG)(px - view.left) * desktopWidth / (view.right - view.left));
+    py = (LONG)((LONGLONG)(py - view.top) * desktopHeight / (view.bottom - view.top));
+    event.mi.dx = MulDiv(px, 65535, desktopWidth - 1);
+    event.mi.dy = MulDiv(py, 65535, desktopHeight - 1);
     event.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
     if (flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL))
     {
@@ -793,8 +812,14 @@ static void CopyFrameRect(DESKTOP_CONTEXT *ctx, const RECT *rect)
 
 static POINT CursorPosition(DESKTOP_CONTEXT *ctx, POINT desktop)
 {
-    (void)ctx;
-    return desktop;
+    int desktopWidth = GetSystemMetrics(SM_CXSCREEN), desktopHeight = GetSystemMetrics(SM_CYSCREEN);
+    RECT view;
+    POINT position = desktop;
+    if (desktopWidth < 1 || desktopHeight < 1) return position;
+    LetterboxView(desktopWidth, desktopHeight, ctx->Width, ctx->Height, &view);
+    position.x = view.left + (LONG)((LONGLONG)desktop.x * (view.right - view.left) / desktopWidth);
+    position.y = view.top + (LONG)((LONGLONG)desktop.y * (view.bottom - view.top) / desktopHeight);
+    return position;
 }
 
 static void DrawCursor(DESKTOP_CONTEXT *ctx, const CURSORINFO *cursor)
