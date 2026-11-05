@@ -132,4 +132,13 @@ VOID
 NTAPI
 co_UserProcessDisplayConfigurationUpdate(VOID);
 
+VOID
+NTAPI
+UserQueueDisplayTopologyChange(VOID);
+
+BOOL
+NTAPI
+UserDetachCloneTarget(
+    _In_ struct _GRAPHICS_DEVICE *pGraphicsDevice);
+
 /* EOF */
