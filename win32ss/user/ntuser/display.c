@@ -1260,6 +1260,7 @@ NtUserSetDisplayConfig(
 
 static volatile LONG gUserDisplayConfigurationPending;
 static volatile LONG gUserDisplayConfigurationQueued;
+static volatile LONG gUserDisplayDetachPending;
 static WORK_QUEUE_ITEM gUserDisplayConfigurationWorkItem;
 
 static
@@ -1283,11 +1284,10 @@ UserpDisplayConfigurationWorker(
     UserLeave();
 }
 
+static
 VOID
-NTAPI
-UserQueueDisplayConfigurationUpdate(VOID)
+UserQueueDisplayConfigurationWorker(VOID)
 {
-    InterlockedExchange(&gUserDisplayConfigurationPending, 1);
     if (InterlockedExchange(&gUserDisplayConfigurationQueued, 1) == 0)
     {
         ExInitializeWorkItem(&gUserDisplayConfigurationWorkItem,
@@ -1295,6 +1295,22 @@ UserQueueDisplayConfigurationUpdate(VOID)
                              NULL);
         ExQueueWorkItem(&gUserDisplayConfigurationWorkItem, DelayedWorkQueue);
     }
+}
+
+VOID
+NTAPI
+UserQueueDisplayConfigurationUpdate(VOID)
+{
+    InterlockedExchange(&gUserDisplayConfigurationPending, 1);
+    UserQueueDisplayConfigurationWorker();
+}
+
+VOID
+NTAPI
+UserQueueDisplayDetach(VOID)
+{
+    InterlockedExchange(&gUserDisplayDetachPending, 1);
+    UserQueueDisplayConfigurationWorker();
 }
 
 VOID
@@ -1308,6 +1324,14 @@ co_UserProcessDisplayConfigurationUpdate(VOID)
     PPDEVOBJ ppdev;
     ULONG iDevNum, cbReturned;
     LONG lResult;
+
+    if (InterlockedExchange(&gUserDisplayDetachPending, 0) != 0)
+    {
+        lResult = UserSetDisplayTopology(SDC_TOPOLOGY_INTERNAL, TRUE);
+        if (lResult != ERROR_SUCCESS)
+            ERR("Could not move the desktop off a removed display: %ld\n", lResult);
+        EngpReleaseRemovedGraphicsDevices();
+    }
 
     if (InterlockedExchange(&gUserDisplayConfigurationPending, 0) == 0)
         return;
