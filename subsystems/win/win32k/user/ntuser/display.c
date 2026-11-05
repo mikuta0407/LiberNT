@@ -313,6 +313,18 @@ UserMonitorDeviceKey(
 
 static
 PGRAPHICS_DEVICE
+UserGetRemoteDisplayDevice(VOID)
+{
+    if (gulRemoteSessionId != PsGetCurrentProcessSessionId() || !gppdevDetached ||
+        UserIsLogonProcess(PsGetCurrentProcessId()) || !gpmdev || !gpmdev->ppdevGlobal)
+    {
+        return NULL;
+    }
+    return gpmdev->ppdevGlobal->pGraphicsDevice;
+}
+
+static
+PGRAPHICS_DEVICE
 UserFindDisplaySettingsDevice(
     _In_opt_ PUNICODE_STRING pustrDevice)
 {
@@ -339,7 +351,7 @@ UserEnumDisplayDevices(
     PDISPLAY_DEVICEW pdispdev,
     DWORD dwFlags)
 {
-    PGRAPHICS_DEVICE pGraphicsDevice;
+    PGRAPHICS_DEVICE pGraphicsDevice, pRemoteDevice;
     PDEVICE_OBJECT pdo;
     VIDEO_MONITOR_DEVICE Monitor = { 0 };
     PWCHAR pHardwareId;
@@ -354,7 +366,13 @@ UserEnumDisplayDevices(
     }
 
     /* Ask gdi for the GRAPHICS_DEVICE */
-    pGraphicsDevice = EngpFindGraphicsDevice(pustrDevice, iDevNum);
+    pRemoteDevice = UserGetRemoteDisplayDevice();
+    if (pRemoteDevice && !pustrDevice)
+        pGraphicsDevice = iDevNum == 0 ? pRemoteDevice : NULL;
+    else
+        pGraphicsDevice = EngpFindGraphicsDevice(pustrDevice, iDevNum);
+    if (pRemoteDevice && pGraphicsDevice != pRemoteDevice)
+        pGraphicsDevice = NULL;
     if (!pGraphicsDevice)
     {
         /* No device found */
@@ -409,6 +427,8 @@ UserEnumDisplayDevices(
         RtlStringCbCopyW(pdispdev->DeviceName, sizeof(pdispdev->DeviceName), pGraphicsDevice->szWinDeviceName);
         RtlStringCbCopyW(pdispdev->DeviceString, sizeof(pdispdev->DeviceString), pGraphicsDevice->pwszDescription);
         pdispdev->StateFlags = pGraphicsDevice->StateFlags;
+        if (pRemoteDevice)
+            pdispdev->StateFlags |= DISPLAY_DEVICE_REMOTE;
     }
     else
     {
@@ -600,10 +620,15 @@ UserEnumCurrentDisplaySettings(
     PDEVMODEW *ppdm,
     PPOINTL pptlPosition)
 {
+    PGRAPHICS_DEVICE pRemoteDevice;
     PPDEVOBJ ppdev;
     PMONITOR pMonitor;
     PDEVMODEW pdmCurrent;
     SIZE_T cjMode;
+
+    pRemoteDevice = UserGetRemoteDisplayDevice();
+    if (pRemoteDevice && pustrDevice && EngpFindGraphicsDevice(pustrDevice, 0) != pRemoteDevice)
+        return STATUS_INVALID_PARAMETER_1;
 
     /* Get the PDEV for the device */
     ppdev = EngpGetPDEV(pustrDevice);
@@ -659,7 +684,7 @@ UserEnumDisplaySettings(
 
     /* Ask GDI for the GRAPHICS_DEVICE */
     pGraphicsDevice = UserFindDisplaySettingsDevice(pustrDevice);
-    if (!pGraphicsDevice)
+    if (!pGraphicsDevice || (UserGetRemoteDisplayDevice() && pGraphicsDevice != UserGetRemoteDisplayDevice()))
     {
         /* No device found */
         ERR("No device found!\n");
@@ -1668,7 +1693,10 @@ NtUserSetDisplayConfig(
         return ERROR_ACCESS_DENIED;
 
     UserEnterExclusive();
-    lRet = UserSetDisplayTopology(Topology, (flags & SDC_APPLY) != 0);
+    if (UserGetRemoteDisplayDevice())
+        lRet = ERROR_SUCCESS;
+    else
+        lRet = UserSetDisplayTopology(Topology, (flags & SDC_APPLY) != 0);
     UserLeave();
     return lRet;
 }
@@ -1904,7 +1932,10 @@ NtUserChangeDisplaySettings(
     /* Acquire global USER lock */
     UserEnterExclusive();
 
-    if (!(dwflags & CDS_NORESET) && GetW32ThreadInfo()->rpdesk != gpdeskInputDesktop)
+    /* A remote session keeps the display of its client */
+    if (UserGetRemoteDisplayDevice())
+        lRet = DISP_CHANGE_SUCCESSFUL;
+    else if (!(dwflags & CDS_NORESET) && GetW32ThreadInfo()->rpdesk != gpdeskInputDesktop)
         lRet = DISP_CHANGE_FAILED;
     else
         lRet = UserChangeDisplaySettings(pustrDevice, lpDevMode, dwflags, NULL);
