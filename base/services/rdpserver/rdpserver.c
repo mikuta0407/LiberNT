@@ -38,6 +38,11 @@
 #include <freerdp/server/disp.h>
 #include <ntsecapi.h>
 #include <swdevice.h>
+#include <cfgmgr32.h>
+#include <initguid.h>
+#include <ntddvdeo.h>
+#include <d3dkmthk.h>
+#include <drivers/directx/rdpvdd.h>
 #include "transfer.h"
 
 typedef ULONG (__cdecl *DEBUG_PRINT)(const char *, ...);
@@ -55,6 +60,8 @@ static volatile LONG DisplayChanged;
 static CRITICAL_SECTION RemoteDisplayLock;
 static HSWDEVICE RemoteDisplay;
 static LONG RemoteDisplayUsers;
+static HANDLE RemoteDisplayReady;
+static WCHAR RemoteDisplayInstance[MAX_DEVICE_ID_LEN];
 
 #define SERVICE_NAME "LiberNTRDPServer"
 #define SERVICE_STOP_EVENT "Global\\LiberNT-RDPServer-Stop"
@@ -72,7 +79,7 @@ typedef struct DESKTOP_CONTEXT
     rdpContext rdp;
     BOOL Authorized, Active, Suppressed, Refresh, NlaLogon, RemoteDisplay;
     LONG Generation;
-    int Width, Height;
+    int Width, Height, ClientWidth, ClientHeight;
     HDC ScreenDC, MemoryDC;
     HBITMAP Bitmap;
     HGDIOBJ OldBitmap;
@@ -262,6 +269,9 @@ static BOOL FollowInputDesktop(DESKTOP_CONTEXT *ctx)
 
 static BOOL Capabilities(freerdp_peer *peer)
 {
+    DESKTOP_CONTEXT *ctx = (DESKTOP_CONTEXT *)peer->context;
+    ctx->ClientWidth = (int)freerdp_settings_get_uint32(peer->context->settings, FreeRDP_DesktopWidth);
+    ctx->ClientHeight = (int)freerdp_settings_get_uint32(peer->context->settings, FreeRDP_DesktopHeight);
     return freerdp_settings_set_uint32(peer->context->settings, FreeRDP_DesktopWidth,
                                        GetSystemMetrics(SM_CXSCREEN)) &&
            freerdp_settings_set_uint32(peer->context->settings, FreeRDP_DesktopHeight,
@@ -346,6 +356,89 @@ static VOID WINAPI RemoteDisplayCreated(HSWDEVICE device, HRESULT result, PVOID 
 {
     (void)device; (void)context;
     Log("Remote display adapter %ls: 0x%08lx", instance ? instance : L"", result);
+    if (SUCCEEDED(result) && instance)
+    {
+        lstrcpynW(RemoteDisplayInstance, instance, ARRAYSIZE(RemoteDisplayInstance));
+        SetEvent(RemoteDisplayReady);
+    }
+}
+
+static BOOL FindRemoteDisplay(WCHAR *name)
+{
+    DISPLAY_DEVICEW device;
+    DWORD index;
+    for (index = 0;; ++index)
+    {
+        device.cb = sizeof(device);
+        if (!EnumDisplayDevicesW(NULL, index, &device, 0)) return FALSE;
+        if (!lstrcmpiW(device.DeviceID, L"RdpVdd_RemoteDisplay"))
+        {
+            lstrcpynW(name, device.DeviceName, ARRAYSIZE(device.DeviceName));
+            return TRUE;
+        }
+    }
+}
+
+static BOOL WaitForRemoteDisplay(int width, int height)
+{
+    WCHAR name[ARRAYSIZE(((DISPLAY_DEVICEW *)0)->DeviceName)];
+    DEVMODEW mode;
+    DWORD index, start = GetTickCount();
+    for (;;)
+    {
+        if (FindRemoteDisplay(name))
+        {
+            if (!width) return TRUE;
+            for (index = 0;; ++index)
+            {
+                ZeroMemory(&mode, sizeof(mode));
+                mode.dmSize = sizeof(mode);
+                if (!EnumDisplaySettingsW(name, index, &mode)) break;
+                if ((int)mode.dmPelsWidth == width && (int)mode.dmPelsHeight == height) return TRUE;
+            }
+        }
+        if (GetTickCount() - start > 15000) return FALSE;
+        Sleep(100);
+    }
+}
+
+static BOOL SetRemoteDisplayMode(int width, int height)
+{
+    WCHAR interfaces[512];
+    D3DKMT_OPENADAPTERFROMDEVICENAME open = {0};
+    D3DKMT_CLOSEADAPTER close = {0};
+    D3DKMT_ESCAPE escape = {0};
+    RDPVDD_ESCAPE request = {0};
+    CONFIGRET cr;
+    NTSTATUS status;
+    if (width < RDPVDD_MIN_WIDTH || width > RDPVDD_MAX_WIDTH ||
+        height < RDPVDD_MIN_HEIGHT || height > RDPVDD_MAX_HEIGHT) return FALSE;
+    cr = CM_Get_Device_Interface_ListW((LPGUID)&GUID_DISPLAY_DEVICE_ARRIVAL, RemoteDisplayInstance, interfaces,
+                                       ARRAYSIZE(interfaces), CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+    if (cr != CR_SUCCESS || !interfaces[0])
+    {
+        Log("No display interface for %ls: %lu", RemoteDisplayInstance, cr);
+        return FALSE;
+    }
+    open.pDeviceName = interfaces;
+    status = D3DKMTOpenAdapterFromDeviceName(&open);
+    if (!NT_SUCCESS(status))
+    {
+        Log("Cannot open the remote display adapter: 0x%08lx", status);
+        return FALSE;
+    }
+    request.Code = RDPVDD_ESCAPE_SET_MODE;
+    request.Width = width;
+    request.Height = height;
+    escape.hAdapter = open.hAdapter;
+    escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+    escape.pPrivateDriverData = &request;
+    escape.PrivateDriverDataSize = sizeof(request);
+    status = D3DKMTEscape(&escape);
+    Log("Remote display mode %dx%d: 0x%08lx", width, height, status);
+    close.hAdapter = open.hAdapter;
+    D3DKMTCloseAdapter(&close);
+    return NT_SUCCESS(status);
 }
 
 static void AcquireRemoteDisplay(DESKTOP_CONTEXT *ctx)
@@ -369,12 +462,33 @@ static void AcquireRemoteDisplay(DESKTOP_CONTEXT *ctx)
         info.CapabilityFlags = SWDeviceCapabilitiesRemovable | SWDeviceCapabilitiesSilentInstall |
                                SWDeviceCapabilitiesDriverRequired;
         info.pszDeviceDescription = L"LiberNT Remote Display Adapter";
+        ResetEvent(RemoteDisplayReady);
         hr = SwDeviceCreate(L"RemoteDisplayEnum", L"HTREE\\ROOT\\0", &info, 0, NULL,
                             RemoteDisplayCreated, NULL, &RemoteDisplay);
         if (FAILED(hr))
         {
             Log("Cannot create the remote display adapter: 0x%08lx", hr);
             RemoteDisplay = NULL;
+        }
+        else if (WaitForSingleObject(RemoteDisplayReady, 15000) == WAIT_OBJECT_0 && WaitForRemoteDisplay(0, 0))
+        {
+            LONG result;
+            int attempt;
+            if (SetRemoteDisplayMode(ctx->ClientWidth, ctx->ClientHeight) &&
+                !WaitForRemoteDisplay(ctx->ClientWidth, ctx->ClientHeight))
+                Log("The remote display does not list %dx%d", ctx->ClientWidth, ctx->ClientHeight);
+            /* A miniport reporting its new monitor mode can fail the first attempt. */
+            for (attempt = 0; attempt < 3; ++attempt)
+            {
+                result = SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_CLONE);
+                if (result == ERROR_SUCCESS) break;
+                Sleep(500);
+            }
+            Log("Desktop cloned to the remote display: %ld", result);
+        }
+        else
+        {
+            Log("The remote display adapter did not start");
         }
     }
     if (RemoteDisplay)
@@ -392,6 +506,8 @@ static void ReleaseRemoteDisplay(DESKTOP_CONTEXT *ctx)
     EnterCriticalSection(&RemoteDisplayLock);
     if (!--RemoteDisplayUsers)
     {
+        Log("Desktop back to the console display: %ld",
+            SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_INTERNAL));
         SwDeviceClose(RemoteDisplay);
         RemoteDisplay = NULL;
         Log("Remote display adapter closed");
@@ -514,6 +630,13 @@ static void ApplyRequestedMode(DESKTOP_CONTEXT *ctx)
     BOOL found = FALSE, fits, bestFits = FALSE;
     LONG status;
     if (!size) return;
+    if (ctx->RemoteDisplay)
+    {
+        EnterCriticalSection(&RemoteDisplayLock);
+        SetRemoteDisplayMode(width, height);
+        LeaveCriticalSection(&RemoteDisplayLock);
+        return;
+    }
     current.dmSize = mode.dmSize = sizeof(DEVMODEW);
     if (!EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &current)) return;
     for (index = 0; EnumDisplaySettingsW(NULL, index, &mode); ++index)
@@ -1012,6 +1135,8 @@ int main(int argc, char **argv)
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT)) return 1;
     if (!EnsureCertificate()) return 2;
     InitializeCriticalSection(&RemoteDisplayLock);
+    RemoteDisplayReady = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!RemoteDisplayReady) return 1;
     StopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!StopEvent) return 1;
     FrameInterval = ReadFrameInterval();
