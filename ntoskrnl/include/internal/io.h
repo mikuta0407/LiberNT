@@ -1834,7 +1834,7 @@ PiNotifyHardwareProfileChange(
     _In_ LPCGUID Event);
 
 CODE_SEG("PAGE")
-VOID
+NTSTATUS
 PiNotifyTargetDeviceChange(
     _In_ LPCGUID Event,
     _In_ PDEVICE_OBJECT DeviceObject,
