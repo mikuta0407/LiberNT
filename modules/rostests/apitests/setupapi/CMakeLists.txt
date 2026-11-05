@@ -11,6 +11,7 @@ list(APPEND SOURCE
     SetupDiGetActualModelsSection.c
     SetupInstallFile.c
     SetupInstallServicesFromInfSectionEx.c
+    SwDevice.c
     UsbInterfaceIds.c
     testlist.c)
 
