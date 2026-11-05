@@ -903,3 +903,4 @@
     SVC_(UserGetThreadDpiHostingBehavior, 0)
     SVC_(UserSetThreadDpiHostingBehavior, 1)
     SVC_(UserGetWindowDpiHostingBehavior, 1)
+    SVC_(UserSetDisplayConfig, 5)
