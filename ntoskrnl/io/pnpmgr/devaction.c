@@ -2286,6 +2286,7 @@ PiSetDeviceStackRemovePending(
 
 typedef struct _PIP_LEAK_CHECK
 {
+    LIST_ENTRY Link;
     PDEVICE_OBJECT DeviceObject;
     UNICODE_STRING InstancePath;
     KTIMER Timer;
@@ -2295,6 +2296,9 @@ typedef struct _PIP_LEAK_CHECK
 
 #define PIP_LEAK_CHECK_DELAY_SECONDS 30
 
+static LIST_ENTRY PipLeakCheckList = { &PipLeakCheckList, &PipLeakCheckList };
+static KSPIN_LOCK PipLeakCheckLock;
+
 static
 VOID
 NTAPI
@@ -2302,12 +2306,24 @@ PipLeakCheckWorker(
     _In_ PVOID Context)
 {
     PPIP_LEAK_CHECK Check = Context;
-    LONG_PTR References = OBJECT_TO_OBJECT_HEADER(Check->DeviceObject)->PointerCount - 1;
+    PDEVICE_OBJECT DeviceObject;
+    LONG_PTR References = 0;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&PipLeakCheckLock, &OldIrql);
+    RemoveEntryList(&Check->Link);
+    DeviceObject = Check->DeviceObject;
+    if (DeviceObject != NULL && ObReferenceObjectSafe(DeviceObject))
+        References = OBJECT_TO_OBJECT_HEADER(DeviceObject)->PointerCount - 1;
+    else
+        DeviceObject = NULL;
+    KeReleaseSpinLock(&PipLeakCheckLock, OldIrql);
 
     if (References != 0)
         DPRINT1("Leaking device %wZ, refCount = %d\n", &Check->InstancePath, (INT32)References);
 
-    ObDereferenceObject(Check->DeviceObject);
+    if (DeviceObject != NULL)
+        ObDereferenceObject(DeviceObject);
     ExFreePoolWithTag(Check->InstancePath.Buffer, TAG_IO);
     ExFreePoolWithTag(Check, TAG_IO);
 }
@@ -2338,6 +2354,7 @@ PipQueueLeakCheck(
 {
     PPIP_LEAK_CHECK Check;
     LARGE_INTEGER DueTime;
+    KIRQL OldIrql;
 
     Check = ExAllocatePoolZero(NonPagedPool, sizeof(*Check), TAG_IO);
     if (Check == NULL)
@@ -2354,13 +2371,33 @@ PipQueueLeakCheck(
     Check->InstancePath.Length = InstancePath->Length;
     Check->InstancePath.MaximumLength = InstancePath->Length;
     Check->DeviceObject = DeviceObject;
-    ObReferenceObject(DeviceObject);
 
     ExInitializeWorkItem(&Check->WorkItem, PipLeakCheckWorker, Check);
     KeInitializeDpc(&Check->Dpc, PipLeakCheckDpc, Check);
     KeInitializeTimer(&Check->Timer);
     DueTime.QuadPart = -(LONGLONG)PIP_LEAK_CHECK_DELAY_SECONDS * 10000000;
+    KeAcquireSpinLock(&PipLeakCheckLock, &OldIrql);
+    InsertTailList(&PipLeakCheckList, &Check->Link);
     KeSetTimer(&Check->Timer, DueTime, &Check->Dpc);
+    KeReleaseSpinLock(&PipLeakCheckLock, OldIrql);
+}
+
+VOID
+PiCancelDeviceLeakCheck(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PLIST_ENTRY Link;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&PipLeakCheckLock, &OldIrql);
+    for (Link = PipLeakCheckList.Flink; Link != &PipLeakCheckList; Link = Link->Flink)
+    {
+        PPIP_LEAK_CHECK Check = CONTAINING_RECORD(Link, PIP_LEAK_CHECK, Link);
+
+        if (Check->DeviceObject == DeviceObject)
+            Check->DeviceObject = NULL;
+    }
+    KeReleaseSpinLock(&PipLeakCheckLock, OldIrql);
 }
 
 static
@@ -2428,6 +2465,14 @@ IopSendRemoveDeviceRelations(PDEVICE_RELATIONS DeviceRelations)
 }
 
 static
+BOOLEAN
+PiDevNodeRemovedAndGone(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    return DeviceNode->State == DeviceNodeRemoved && (DeviceNode->Flags & DNF_DEVICE_GONE);
+}
+
+static
 VOID
 IopSendRemoveChildDevices(PDEVICE_NODE ParentDeviceNode)
 {
@@ -2443,7 +2488,8 @@ IopSendRemoveChildDevices(PDEVICE_NODE ParentDeviceNode)
 
         /* The PDO may outlive its removed parent while references drain. */
         PiUnlinkDevNode(ChildDeviceNode);
-        IopSendRemoveDevice(ChildDeviceNode->PhysicalDeviceObject);
+        if (!PiDevNodeRemovedAndGone(ChildDeviceNode))
+            IopSendRemoveDevice(ChildDeviceNode->PhysicalDeviceObject);
 
         ChildDeviceNode = NextDeviceNode;
 
@@ -2564,6 +2610,12 @@ IopQueryRemoveChildDevices(PDEVICE_NODE ParentDeviceNode, BOOLEAN Force)
     {
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
+        if (PiDevNodeRemovedAndGone(ChildDeviceNode))
+        {
+            KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
+            ChildDeviceNode = NextDeviceNode;
+            continue;
+        }
         PiSetDevNodeState(ChildDeviceNode, DeviceNodeAwaitingQueuedRemoval);
 
         Status = IopPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject, Force);
@@ -2588,7 +2640,8 @@ cleanup:
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 
-        IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
+        if (!PiDevNodeRemovedAndGone(ChildDeviceNode))
+            IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
 
         /* IRP_MN_CANCEL_REMOVE_DEVICE is also sent to the device
          * that failed the IRP_MN_QUERY_REMOVE_DEVICE request */
@@ -2727,6 +2780,13 @@ PiSurpriseRemoveChildDevices(PDEVICE_NODE ParentDeviceNode)
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 
+        if (PiDevNodeRemovedAndGone(ChildDeviceNode))
+        {
+            PiUnlinkDevNode(ChildDeviceNode);
+            ChildDeviceNode = NextDeviceNode;
+            KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
+            continue;
+        }
         IopSendSurpriseRemoval(ChildDeviceNode->PhysicalDeviceObject);
         IopQueueTargetDeviceEvent(&GUID_DEVICE_SURPRISE_REMOVAL, &ChildDeviceNode->InstancePath);
         PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_COMPLETE, ChildDeviceNode->PhysicalDeviceObject, NULL);

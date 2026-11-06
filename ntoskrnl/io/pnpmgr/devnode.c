@@ -413,6 +413,7 @@ IopFreeDeviceNode(
 
     /* Release the node's resource-DB grant before it goes away */
     IopResDbRelease(DeviceNode);
+    PiCancelDeviceLeakCheck(DeviceNode->PhysicalDeviceObject);
 
     PiUnlinkDevNode(DeviceNode);
 
