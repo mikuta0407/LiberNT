@@ -3423,6 +3423,7 @@ typedef struct _LX_VCACHE_ENTRY
     ULONG Hash;
     LONG64 Generation;
     LONG64 ModeGeneration;
+    LONG64 StatGeneration;
     LONG64 Time;
     LONG Error;
     BOOLEAN Exists;
@@ -3440,6 +3441,7 @@ static FAST_MUTEX LxVcacheLock;
 static ULONG LxVcacheCount;
 static volatile LONG64 LxVcacheGeneration = 1;
 static volatile LONG64 LxVcacheModeGeneration = 1;
+static volatile LONG64 LxVcacheStatGeneration = 1;
 
 VOID
 LxVcacheInitialize(VOID)
@@ -3576,6 +3578,7 @@ LxVcacheInvalidatePath(
     ULONG Hash;
     PLX_VCACHE_ENTRY Entry;
 
+    InterlockedIncrement64(&LxVcacheStatGeneration);
     if (Owner == NULL)
         return;
     Hash = LxVcacheHash(Owner, LX_VCACHE_STAT, Path);
@@ -4678,7 +4681,8 @@ LxVfsStatNode(
     LONG Error;
 
     PLX_VCACHE_ENTRY Entry;
-    LONG64 Generation = LxVcacheGeneration, Now = (LONG64)KeQueryInterruptTime();
+    LONG64 Generation = LxVcacheGeneration, StatGeneration = LxVcacheStatGeneration;
+    LONG64 ModeGeneration = LxVcacheModeGeneration, Now = (LONG64)KeQueryInterruptTime();
     ULONG Hash;
 
     if (Node->Mount->Kind == LxFsTmpfs)
@@ -4698,7 +4702,8 @@ LxVfsStatNode(
     Hash = LxVcacheHash(LxProcessNs(Process, LxNsMnt), LX_VCACHE_STAT, Node->Path);
     ExAcquireFastMutex(&LxVcacheLock);
     Entry = LxVcacheFind(LxProcessNs(Process, LxNsMnt), LX_VCACHE_STAT, 0, Node->Path, Hash);
-    if ((Entry != NULL) && (Entry->Generation == Generation) && (Now - Entry->Time < LX_VCACHE_STAT_TTL))
+    if ((Entry != NULL) && (Entry->Generation == Generation) && (Entry->StatGeneration == StatGeneration) &&
+        (Entry->ModeGeneration == ModeGeneration) && (Now - Entry->Time < LX_VCACHE_STAT_TTL))
     {
         *Stat = Entry->Stat;
         ExReleaseFastMutex(&LxVcacheLock);
@@ -4729,6 +4734,8 @@ LxVfsStatNode(
                 Entry->Kind = LX_VCACHE_STAT;
                 Entry->Hash = Hash;
                 Entry->Generation = Generation;
+                Entry->StatGeneration = StatGeneration;
+                Entry->ModeGeneration = ModeGeneration;
                 Entry->Time = Now;
                 Entry->Stat = *Stat;
                 LxVcachePut(Entry);
