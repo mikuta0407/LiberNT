@@ -524,8 +524,8 @@ ConnectRemote(
     if (bLocked)
     {
         CloseAllDialogWindows();
-        CallNotificationDlls(Session, UnlockHandler);
         SwitchDesktop(Session->ApplicationDesktop);
+        CallNotificationDlls(Session, UnlockHandler);
         Session->LogonState = STATE_LOGGED_ON;
     }
     else
