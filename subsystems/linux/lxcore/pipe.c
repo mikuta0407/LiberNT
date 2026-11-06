@@ -513,8 +513,8 @@ LxPipeCreatePair(
         return -LX_ENOMEM;
     if (Process != NULL)
     {
-        Pipe->Uid = Process->Fsuid;
-        Pipe->Gid = Process->Fsgid;
+        Pipe->Uid = LxCred(Process)->Fsuid;
+        Pipe->Gid = LxCred(Process)->Fsgid;
     }
 
     *ReadEnd = LxPipeOpenEnd(Pipe, LX_O_RDONLY | (Flags & LX_O_NONBLOCK));

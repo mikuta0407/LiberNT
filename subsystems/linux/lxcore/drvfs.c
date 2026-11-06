@@ -137,8 +137,8 @@ LxDrvfsParseOptions(
     PCSTR Cursor = Data;
 
     RtlZeroMemory(Options, sizeof(*Options));
-    Options->Uid = Process->Instance->DrvfsDefaults ? Process->Instance->DrvfsUid : Process->Fsuid;
-    Options->Gid = Process->Instance->DrvfsDefaults ? Process->Instance->DrvfsGid : Process->Fsgid;
+    Options->Uid = Process->Instance->DrvfsDefaults ? Process->Instance->DrvfsUid : LxCred(Process)->Fsuid;
+    Options->Gid = Process->Instance->DrvfsDefaults ? Process->Instance->DrvfsGid : LxCred(Process)->Fsgid;
     Options->Umask = 022;
 
     while ((Cursor != NULL) && (*Cursor != '\0'))

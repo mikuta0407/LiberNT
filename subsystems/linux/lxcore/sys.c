@@ -382,11 +382,11 @@ LxPtraceMayRead(
     Capable = LxNsCapable(Caller, TargetNs, LX_CAP_SYS_PTRACE);
     for (Index = 0; Index < 3; Index++)
     {
-        if ((Target->Uid[Index] != Caller->Uid[0]) || (Target->Gid[Index] != Caller->Gid[0]))
+        if ((LxCred(Target)->Uid[Index] != LxCred(Caller)->Uid[0]) || (LxCred(Target)->Gid[Index] != LxCred(Caller)->Gid[0]))
             Allowed = FALSE;
     }
     if (!Capable && (!Allowed || (Target->Dumpable != 1) || (TargetNs != LxCredUserNs(Caller)) ||
-                     (Target->CapPermitted & ~Caller->CapPermitted)))
+                     (LxCred(Target)->CapPermitted & ~LxCred(Caller)->CapPermitted)))
     {
         Allowed = FALSE;
     }
@@ -1148,8 +1148,8 @@ LX_SYSCALL(LxSysSchedSetaffinity)
     if (Result != 0)
         return Result;
     Target = Thread->Process;
-    if ((Target != Call->Process) && (Call->Process->Uid[1] != Target->Uid[1]) &&
-        (Call->Process->Uid[1] != Target->Uid[0]))
+    if ((Target != Call->Process) && (LxCred(Call->Process)->Uid[1] != LxCred(Target)->Uid[1]) &&
+        (LxCred(Call->Process)->Uid[1] != LxCred(Target)->Uid[0]))
     {
         PLX_NS TargetNs = LxUserNsOf(Target);
         BOOLEAN Capable = LxNsCapable(Call->Process, TargetNs, LX_CAP_SYS_NICE);
@@ -1719,22 +1719,22 @@ LX_SYSCALL(LxSysGettid)
 
 LX_SYSCALL(LxSysGetuid)
 {
-    return LxCredViewId(Call->Process, FALSE, Call->Process->Uid[0]);
+    return LxCredViewId(Call->Process, FALSE, LxCred(Call->Process)->Uid[0]);
 }
 
 LX_SYSCALL(LxSysGeteuid)
 {
-    return LxCredViewId(Call->Process, FALSE, Call->Process->Uid[1]);
+    return LxCredViewId(Call->Process, FALSE, LxCred(Call->Process)->Uid[1]);
 }
 
 LX_SYSCALL(LxSysGetgid)
 {
-    return LxCredViewId(Call->Process, TRUE, Call->Process->Gid[0]);
+    return LxCredViewId(Call->Process, TRUE, LxCred(Call->Process)->Gid[0]);
 }
 
 LX_SYSCALL(LxSysGetegid)
 {
-    return LxCredViewId(Call->Process, TRUE, Call->Process->Gid[1]);
+    return LxCredViewId(Call->Process, TRUE, LxCred(Call->Process)->Gid[1]);
 }
 
 static
@@ -1743,7 +1743,7 @@ LxGetresid(
     _Inout_ PLX_CALL Call,
     _In_ BOOLEAN Group)
 {
-    PULONG Ids = Group ? Call->Process->Gid : Call->Process->Uid;
+    PULONG Ids = Group ? LxCred(Call->Process)->Gid : LxCred(Call->Process)->Uid;
     ULONG View[3], Index;
     LONG64 Result = 0;
 
@@ -1790,8 +1790,8 @@ LxSetid(
 {
     PLX_PROCESS Process = Call->Process;
     BOOLEAN Capable = LxNsCapable(Process, NULL, Group ? LX_CAP_SETGID : LX_CAP_SETUID);
-    PULONG Ids = Group ? Process->Gid : Process->Uid;
-    PULONG Fs = Group ? &Process->Fsgid : &Process->Fsuid;
+    PULONG Ids = Group ? LxCred(Process)->Gid : LxCred(Process)->Uid;
+    PULONG Fs = Group ? &LxCred(Process)->Fsgid : &LxCred(Process)->Fsuid;
     ULONG Arg[3], Key[3], New[3], Index;
     LX_CRED_SAVE Old;
     LONG64 Result = 0;
@@ -1862,6 +1862,7 @@ LxSetid(
                     LxCredFixSetuid(Process, &Old, TRUE);
                 LxCredCommit(Process, &Old);
             }
+            LxCredPublish(Process);
             ExReleaseFastMutex(&Process->Lock);
             return Result;
     }
@@ -1873,6 +1874,7 @@ LxSetid(
             LxCredFixSetuid(Process, &Old, FALSE);
         LxCredCommit(Process, &Old);
     }
+    LxCredPublish(Process);
     ExReleaseFastMutex(&Process->Lock);
     return Result;
 }
@@ -1925,8 +1927,8 @@ LX_SYSCALL(LxSysGetgroups)
     ULONG Count, Index;
 
     ExAcquireFastMutex(&Process->Lock);
-    Count = Process->GroupCount;
-    RtlCopyMemory(Groups, Process->Groups, Count * sizeof(ULONG));
+    Count = LxCred(Process)->GroupCount;
+    RtlCopyMemory(Groups, LxCred(Process)->Groups, Count * sizeof(ULONG));
     ExReleaseFastMutex(&Process->Lock);
     for (Index = 0; Index < Count; Index++)
         Groups[Index] = LxCredViewId(Process, TRUE, Groups[Index]);
@@ -1964,8 +1966,9 @@ LX_SYSCALL(LxSysSetgroups)
             return -LX_EINVAL;
     }
     ExAcquireFastMutex(&Process->Lock);
-    Process->GroupCount = Size;
-    RtlCopyMemory(Process->Groups, Groups, Size * sizeof(ULONG));
+    LxCred(Process)->GroupCount = Size;
+    RtlCopyMemory(LxCred(Process)->Groups, Groups, Size * sizeof(ULONG));
+    LxCredPublish(Process);
     ExReleaseFastMutex(&Process->Lock);
     return 0;
 }
@@ -2145,7 +2148,7 @@ LX_SYSCALL(LxSysKill)
         RtlZeroMemory(&Info, sizeof(Info));
         Info.Code = LX_SI_USER;
         Info.Child.Pid = (LONG)Call->Process->Pid;
-        Info.Child.Uid = Call->Process->Uid[0];
+        Info.Child.Uid = LxCred(Call->Process)->Uid[0];
         LxSignalSend(Target, NULL, Signal, &Info);
     }
     LxProcessDereference(Target);
@@ -2194,7 +2197,7 @@ LxSignalThread(
         RtlZeroMemory(&Info, sizeof(Info));
         Info.Code = LX_SI_TKILL;
         Info.Child.Pid = (LONG)Call->Process->Pid;
-        Info.Child.Uid = Call->Process->Uid[0];
+        Info.Child.Uid = LxCred(Call->Process)->Uid[0];
         LxSignalSend(Owner, Thread, Signal, &Info);
     }
     LxProcessDereference(Owner);
@@ -3372,7 +3375,7 @@ LxWaitChild(
         {
             *FoundPid = LxPidNr(Process, Reported);
             *WaitStatus = Status;
-            *Uid = Reported->Uid[0];
+            *Uid = LxCred(Reported)->Uid[0];
             LxProcessUsage(Reported, NULL, ChildUsage);
             LxProcessDereference(Reported);
             return 0;
@@ -3388,7 +3391,7 @@ LxWaitChild(
         {
             *FoundPid = LxPidNr(Process, Found->Lx);
             *WaitStatus = Found->Lx->WaitStatus;
-            *Uid = Found->Lx->Uid[0];
+            *Uid = LxCred(Found->Lx)->Uid[0];
             LxProcessUsage(Found->Lx, Found->Process, ChildUsage);
             ChildUsage->UserTime += Found->Lx->ChildUserTime;
             ChildUsage->KernelTime += Found->Lx->ChildKernelTime;
@@ -3940,18 +3943,19 @@ LX_SYSCALL(LxSysPrctl)
             return 0;
 
         case LX_PR_GET_KEEPCAPS:
-            return (Process->SecureBits & LX_SECBIT_KEEP_CAPS) ? 1 : 0;
+            return (LxCred(Process)->SecureBits & LX_SECBIT_KEEP_CAPS) ? 1 : 0;
 
         case LX_PR_SET_KEEPCAPS:
             if (Arg > 1)
                 return -LX_EINVAL;
-            if (Process->SecureBits & LX_SECBIT_KEEP_CAPS_LOCKED)
+            if (LxCred(Process)->SecureBits & LX_SECBIT_KEEP_CAPS_LOCKED)
                 return -LX_EPERM;
             ExAcquireFastMutex(&Process->Lock);
             if (Arg != 0)
-                Process->SecureBits |= LX_SECBIT_KEEP_CAPS;
+                LxCred(Process)->SecureBits |= LX_SECBIT_KEEP_CAPS;
             else
-                Process->SecureBits &= ~LX_SECBIT_KEEP_CAPS;
+                LxCred(Process)->SecureBits &= ~LX_SECBIT_KEEP_CAPS;
+            LxCredPublish(Process);
             ExReleaseFastMutex(&Process->Lock);
             return 0;
 
@@ -3994,7 +3998,7 @@ LX_SYSCALL(LxSysPrctl)
         case LX_PR_CAPBSET_READ:
             if (Arg > LX_CAP_LAST_CAP)
                 return -LX_EINVAL;
-            return (Process->CapBounding >> Arg) & 1;
+            return (LxCred(Process)->CapBounding >> Arg) & 1;
 
         case LX_PR_CAPBSET_DROP:
             if (!LxNsCapable(Process, NULL, LX_CAP_SETPCAP))
@@ -4002,7 +4006,8 @@ LX_SYSCALL(LxSysPrctl)
             if (Arg > LX_CAP_LAST_CAP)
                 return -LX_EINVAL;
             ExAcquireFastMutex(&Process->Lock);
-            Process->CapBounding &= ~(1ULL << Arg);
+            LxCred(Process)->CapBounding &= ~(1ULL << Arg);
+            LxCredPublish(Process);
             ExReleaseFastMutex(&Process->Lock);
             return 0;
 
@@ -4015,32 +4020,34 @@ LX_SYSCALL(LxSysPrctl)
                 if (Call->Args[2] | Call->Args[3] | Call->Args[4])
                     return -LX_EINVAL;
                 ExAcquireFastMutex(&Process->Lock);
-                Process->CapAmbient = 0;
+                LxCred(Process)->CapAmbient = 0;
+                LxCredPublish(Process);
                 ExReleaseFastMutex(&Process->Lock);
                 return 0;
             }
             if ((Call->Args[2] > LX_CAP_LAST_CAP) || Call->Args[3] || Call->Args[4])
                 return -LX_EINVAL;
             if (Arg == 1)
-                return (Process->CapAmbient & Bit) ? 1 : 0;
+                return (LxCred(Process)->CapAmbient & Bit) ? 1 : 0;
             if ((Arg != 2) && (Arg != 3))
                 return -LX_EINVAL;
-            if ((Arg == 2) && (!(Process->CapPermitted & Bit) || !(Process->CapInheritable & Bit) ||
-                               (Process->SecureBits & LX_SECBIT_NO_CAP_AMBIENT_RAISE)))
+            if ((Arg == 2) && (!(LxCred(Process)->CapPermitted & Bit) || !(LxCred(Process)->CapInheritable & Bit) ||
+                               (LxCred(Process)->SecureBits & LX_SECBIT_NO_CAP_AMBIENT_RAISE)))
             {
                 return -LX_EPERM;
             }
             ExAcquireFastMutex(&Process->Lock);
             if (Arg == 2)
-                Process->CapAmbient |= Bit;
+                LxCred(Process)->CapAmbient |= Bit;
             else
-                Process->CapAmbient &= ~Bit;
+                LxCred(Process)->CapAmbient &= ~Bit;
+            LxCredPublish(Process);
             ExReleaseFastMutex(&Process->Lock);
             return 0;
         }
 
         case LX_PR_GET_SECUREBITS:
-            return Process->SecureBits;
+            return LxCred(Process)->SecureBits;
 
         case LX_PR_SET_SECUREBITS:
             return LxCredSetSecureBits(Process, Arg);
@@ -4115,6 +4122,7 @@ LX_SYSCALL(LxSysCapget)
     } Header;
     ULONG Data[6];
     PLX_PROCESS Target = Call->Process;
+    PLX_CRED Cred;
     LONG64 Result;
 
     Result = LxCopyFromUser(&Header, Call->Args[0], sizeof(Header));
@@ -4133,23 +4141,25 @@ LX_SYSCALL(LxSysCapget)
     if (Header.Pid < 0)
         return -LX_EINVAL;
 
-    if ((Header.Pid != 0) && ((ULONG)Header.Pid != LxPidNr(Call->Process, Call->Process)))
+    if ((Header.Pid != 0) && ((ULONG)Header.Pid != LxTidNr(Call->Process, Call->Thread)))
     {
         Target = LxProcessLookupNr(Call->Process, (ULONG)Header.Pid);
         if (Target == NULL)
             return -LX_ESRCH;
+        Cred = &Target->Cred;
     }
     else
     {
         LxProcessReference(Target);
+        Cred = LxCred(Target);
     }
 
-    Data[0] = (ULONG)Target->CapEffective;
-    Data[1] = (ULONG)Target->CapPermitted;
-    Data[2] = (ULONG)Target->CapInheritable;
-    Data[3] = (ULONG)(Target->CapEffective >> 32);
-    Data[4] = (ULONG)(Target->CapPermitted >> 32);
-    Data[5] = (ULONG)(Target->CapInheritable >> 32);
+    Data[0] = (ULONG)Cred->CapEffective;
+    Data[1] = (ULONG)Cred->CapPermitted;
+    Data[2] = (ULONG)Cred->CapInheritable;
+    Data[3] = (ULONG)(Cred->CapEffective >> 32);
+    Data[4] = (ULONG)(Cred->CapPermitted >> 32);
+    Data[5] = (ULONG)(Cred->CapInheritable >> 32);
     LxProcessDereference(Target);
     return LxCopyToUser(Call->Args[1], Data, (Header.Version == 0x19980330) ? 12 : sizeof(Data));
 }

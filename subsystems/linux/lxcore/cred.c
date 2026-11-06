@@ -14,6 +14,27 @@
 
 static volatile LONG LxOverflowIds[2] = { 65534, 65534 };
 
+PLX_CRED
+LxCred(
+    _In_ PLX_PROCESS Process)
+{
+    PLX_THREAD Thread = LxCurrentThread();
+
+    if ((Thread != NULL) && (Thread->Process == Process))
+        return &Thread->Cred;
+    return &Process->Cred;
+}
+
+VOID
+LxCredPublish(
+    _Inout_ PLX_PROCESS Process)
+{
+    PLX_THREAD Thread = LxCurrentThread();
+
+    if ((Thread != NULL) && (Thread->Process == Process) && (Thread->Tid == Process->Pid))
+        Process->Cred = Thread->Cred;
+}
+
 PLX_NS
 LxCredUserNs(
     _In_ PLX_PROCESS Process)
@@ -169,10 +190,10 @@ LxNsCapable(
     for (;;)
     {
         if (Ns == Own)
-            return ((Process->CapEffective >> Capability) & 1) != 0;
+            return ((LxCred(Process)->CapEffective >> Capability) & 1) != 0;
         if ((Ns == NULL) || (Ns->Level <= Own->Level))
             return FALSE;
-        if ((Ns->Parent == Own) && (Ns->User.OwnerUid == Process->Uid[1]))
+        if ((Ns->Parent == Own) && (Ns->User.OwnerUid == LxCred(Process)->Uid[1]))
             return TRUE;
         Ns = Ns->Parent;
     }
@@ -232,8 +253,8 @@ LxPermissionAs(
     BOOLEAN Member = (Fsgid == Gid);
 
     Mask &= LX_MAY_READ | LX_MAY_WRITE | LX_MAY_EXEC;
-    for (Index = 0; !Member && (Index < Process->GroupCount); Index++)
-        Member = (Process->Groups[Index] == Gid);
+    for (Index = 0; !Member && (Index < LxCred(Process)->GroupCount); Index++)
+        Member = (LxCred(Process)->Groups[Index] == Gid);
     if (Fsuid == Uid)
         Bits = (Mode >> 6) & 7;
     else if (Member)
@@ -263,7 +284,7 @@ LxPermission(
     _In_ ULONG Gid,
     _In_ ULONG Mask)
 {
-    return LxPermissionAs(Process, Process->Fsuid, Process->Fsgid, Process->CapEffective, Mode, Uid, Gid, Mask);
+    return LxPermissionAs(Process, LxCred(Process)->Fsuid, LxCred(Process)->Fsgid, LxCred(Process)->CapEffective, Mode, Uid, Gid, Mask);
 }
 
 BOOLEAN
@@ -272,7 +293,7 @@ LxOwnerOrCapable(
     _In_ ULONG Uid,
     _In_ ULONG Gid)
 {
-    return (Process->Fsuid == Uid) || LxCapableWrtIds(Process, Uid, Gid, LX_CAP_FOWNER);
+    return (LxCred(Process)->Fsuid == Uid) || LxCapableWrtIds(Process, Uid, Gid, LX_CAP_FOWNER);
 }
 
 BOOLEAN
@@ -297,11 +318,11 @@ LxInGroup(
 {
     ULONG Index;
 
-    if (Process->Fsgid == Gid)
+    if (LxCred(Process)->Fsgid == Gid)
         return TRUE;
-    for (Index = 0; Index < Process->GroupCount; Index++)
+    for (Index = 0; Index < LxCred(Process)->GroupCount; Index++)
     {
-        if (Process->Groups[Index] == Gid)
+        if (LxCred(Process)->Groups[Index] == Gid)
             return TRUE;
     }
     return FALSE;
@@ -321,11 +342,11 @@ LxCredSave(
     _In_ PLX_PROCESS Process,
     _Out_ PLX_CRED_SAVE Save)
 {
-    RtlCopyMemory(Save->Uid, Process->Uid, sizeof(Save->Uid));
-    RtlCopyMemory(Save->Gid, Process->Gid, sizeof(Save->Gid));
-    Save->Fsuid = Process->Fsuid;
-    Save->Fsgid = Process->Fsgid;
-    Save->CapPermitted = Process->CapPermitted;
+    RtlCopyMemory(Save->Uid, LxCred(Process)->Uid, sizeof(Save->Uid));
+    RtlCopyMemory(Save->Gid, LxCred(Process)->Gid, sizeof(Save->Gid));
+    Save->Fsuid = LxCred(Process)->Fsuid;
+    Save->Fsgid = LxCred(Process)->Fsgid;
+    Save->CapPermitted = LxCred(Process)->CapPermitted;
 }
 
 VOID
@@ -337,28 +358,28 @@ LxCredFixSetuid(
     ULONG Root = LxCredMakeId(Process, FALSE, 0);
     BOOLEAN WasRoot, IsRoot;
 
-    if (Process->SecureBits & LX_SECBIT_NO_SETUID_FIXUP)
+    if (LxCred(Process)->SecureBits & LX_SECBIT_NO_SETUID_FIXUP)
         return;
     if (FileSystem)
     {
-        if ((Old->Fsuid == Root) && (Process->Fsuid != Root))
-            Process->CapEffective &= ~LX_CAP_FS_SET;
-        else if ((Old->Fsuid != Root) && (Process->Fsuid == Root))
-            Process->CapEffective |= Process->CapPermitted & LX_CAP_FS_SET;
+        if ((Old->Fsuid == Root) && (LxCred(Process)->Fsuid != Root))
+            LxCred(Process)->CapEffective &= ~LX_CAP_FS_SET;
+        else if ((Old->Fsuid != Root) && (LxCred(Process)->Fsuid == Root))
+            LxCred(Process)->CapEffective |= LxCred(Process)->CapPermitted & LX_CAP_FS_SET;
         return;
     }
     WasRoot = (Old->Uid[0] == Root) || (Old->Uid[1] == Root) || (Old->Uid[2] == Root);
-    IsRoot = (Process->Uid[0] == Root) || (Process->Uid[1] == Root) || (Process->Uid[2] == Root);
+    IsRoot = (LxCred(Process)->Uid[0] == Root) || (LxCred(Process)->Uid[1] == Root) || (LxCred(Process)->Uid[2] == Root);
     if (WasRoot && !IsRoot)
     {
-        if (!(Process->SecureBits & LX_SECBIT_KEEP_CAPS))
-            Process->CapPermitted = Process->CapEffective = 0;
-        Process->CapAmbient = 0;
+        if (!(LxCred(Process)->SecureBits & LX_SECBIT_KEEP_CAPS))
+            LxCred(Process)->CapPermitted = LxCred(Process)->CapEffective = 0;
+        LxCred(Process)->CapAmbient = 0;
     }
-    if ((Old->Uid[1] == Root) && (Process->Uid[1] != Root))
-        Process->CapEffective = 0;
-    else if ((Old->Uid[1] != Root) && (Process->Uid[1] == Root))
-        Process->CapEffective = Process->CapPermitted;
+    if ((Old->Uid[1] == Root) && (LxCred(Process)->Uid[1] != Root))
+        LxCred(Process)->CapEffective = 0;
+    else if ((Old->Uid[1] != Root) && (LxCred(Process)->Uid[1] == Root))
+        LxCred(Process)->CapEffective = LxCred(Process)->CapPermitted;
 }
 
 VOID
@@ -366,8 +387,8 @@ LxCredCommit(
     _Inout_ PLX_PROCESS Process,
     _In_ PLX_CRED_SAVE Old)
 {
-    if ((Process->Uid[1] != Old->Uid[1]) || (Process->Gid[1] != Old->Gid[1]) || (Process->Fsuid != Old->Fsuid) ||
-        (Process->Fsgid != Old->Fsgid) || (Process->CapPermitted & ~Old->CapPermitted))
+    if ((LxCred(Process)->Uid[1] != Old->Uid[1]) || (LxCred(Process)->Gid[1] != Old->Gid[1]) || (LxCred(Process)->Fsuid != Old->Fsuid) ||
+        (LxCred(Process)->Fsgid != Old->Fsgid) || (LxCred(Process)->CapPermitted & ~Old->CapPermitted))
     {
         Process->Dumpable = LX_SUID_DUMPABLE;
         Process->PdeathSignal = 0;
@@ -383,27 +404,27 @@ LxCredExec(
     ULONG64 Permitted = 0;
     BOOLEAN Effective = FALSE, IdChanged;
 
-    if (!(Process->SecureBits & LX_SECBIT_NOROOT))
+    if (!(LxCred(Process)->SecureBits & LX_SECBIT_NOROOT))
     {
-        if ((Process->Uid[1] == Root) || (Process->Uid[0] == Root))
-            Permitted = Process->CapBounding | Process->CapInheritable;
-        Effective = (Process->Uid[1] == Root);
+        if ((LxCred(Process)->Uid[1] == Root) || (LxCred(Process)->Uid[0] == Root))
+            Permitted = LxCred(Process)->CapBounding | LxCred(Process)->CapInheritable;
+        Effective = (LxCred(Process)->Uid[1] == Root);
     }
-    IdChanged = (Process->Uid[1] != Old->Uid[1]) || !LxInGroup(Process, Process->Gid[1]);
+    IdChanged = (LxCred(Process)->Uid[1] != Old->Uid[1]) || !LxInGroup(Process, LxCred(Process)->Gid[1]);
     if ((IdChanged || (Permitted & ~Old->CapPermitted)) && Process->NoNewPrivs)
         Permitted &= Old->CapPermitted;
 
-    Process->Uid[2] = Process->Fsuid = Process->Uid[1];
-    Process->Gid[2] = Process->Fsgid = Process->Gid[1];
+    LxCred(Process)->Uid[2] = LxCred(Process)->Fsuid = LxCred(Process)->Uid[1];
+    LxCred(Process)->Gid[2] = LxCred(Process)->Fsgid = LxCred(Process)->Gid[1];
     if (IdChanged)
-        Process->CapAmbient = 0;
-    Permitted |= Process->CapAmbient;
-    Process->CapPermitted = Permitted;
-    Process->CapEffective = Effective ? Permitted : Process->CapAmbient;
-    Process->SecureBits &= ~LX_SECBIT_KEEP_CAPS;
-    if (IdChanged || (Process->Uid[1] != Process->Uid[0]) || (Process->Gid[1] != Process->Gid[0]))
+        LxCred(Process)->CapAmbient = 0;
+    Permitted |= LxCred(Process)->CapAmbient;
+    LxCred(Process)->CapPermitted = Permitted;
+    LxCred(Process)->CapEffective = Effective ? Permitted : LxCred(Process)->CapAmbient;
+    LxCred(Process)->SecureBits &= ~LX_SECBIT_KEEP_CAPS;
+    if (IdChanged || (LxCred(Process)->Uid[1] != LxCred(Process)->Uid[0]) || (LxCred(Process)->Gid[1] != LxCred(Process)->Gid[0]))
         Process->PdeathSignal = 0;
-    Process->Dumpable = ((Process->Uid[1] == Process->Uid[0]) && (Process->Gid[1] == Process->Gid[0])) ? 1 : LX_SUID_DUMPABLE;
+    Process->Dumpable = ((LxCred(Process)->Uid[1] == LxCred(Process)->Uid[0]) && (LxCred(Process)->Gid[1] == LxCred(Process)->Gid[0])) ? 1 : LX_SUID_DUMPABLE;
 }
 
 LONG
@@ -417,21 +438,22 @@ LxCredSetCapabilities(
     LONG Error = 0;
 
     ExAcquireFastMutex(&Process->Lock);
-    if (Capped && (Inheritable & ~(Process->CapInheritable | Process->CapPermitted)))
+    if (Capped && (Inheritable & ~(LxCred(Process)->CapInheritable | LxCred(Process)->CapPermitted)))
         Error = -LX_EPERM;
-    else if (Inheritable & ~(Process->CapInheritable | Process->CapBounding))
+    else if (Inheritable & ~(LxCred(Process)->CapInheritable | LxCred(Process)->CapBounding))
         Error = -LX_EPERM;
-    else if (Permitted & ~Process->CapPermitted)
+    else if (Permitted & ~LxCred(Process)->CapPermitted)
         Error = -LX_EPERM;
     else if (Effective & ~Permitted)
         Error = -LX_EPERM;
     if (Error == 0)
     {
-        Process->CapEffective = Effective;
-        Process->CapPermitted = Permitted;
-        Process->CapInheritable = Inheritable;
-        Process->CapAmbient &= Permitted & Inheritable;
+        LxCred(Process)->CapEffective = Effective;
+        LxCred(Process)->CapPermitted = Permitted;
+        LxCred(Process)->CapInheritable = Inheritable;
+        LxCred(Process)->CapAmbient &= Permitted & Inheritable;
     }
+    LxCredPublish(Process);
     ExReleaseFastMutex(&Process->Lock);
     return Error;
 }
@@ -446,7 +468,7 @@ LxCredSetSecureBits(
     LONG Error = 0;
 
     ExAcquireFastMutex(&Process->Lock);
-    Old = Process->SecureBits;
+    Old = LxCred(Process)->SecureBits;
     Changed = Old ^ Bits;
     if ((((Old & LX_SECURE_ALL_LOCKS) >> 1) & Changed) || (Old & LX_SECURE_ALL_LOCKS & ~Bits) ||
         (Bits & ~(ULONG64)(LX_SECURE_ALL_LOCKS | LX_SECURE_ALL_BITS)))
@@ -460,8 +482,9 @@ LxCredSetSecureBits(
     }
     else
     {
-        Process->SecureBits = (ULONG)Bits;
+        LxCred(Process)->SecureBits = (ULONG)Bits;
     }
+    LxCredPublish(Process);
     ExReleaseFastMutex(&Process->Lock);
     return Error;
 }

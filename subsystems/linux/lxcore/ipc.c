@@ -285,8 +285,8 @@ LxIpcInsert(
     Object->Seq = (USHORT)Ids->Seq;
     Object->Id = (Ids->Seq << LX_IPCMNI_SHIFT) + Index;
     Object->Key = Key;
-    Object->Uid = Object->Cuid = Process->Uid[1];
-    Object->Gid = Object->Cgid = Process->Gid[1];
+    Object->Uid = Object->Cuid = LxCred(Process)->Uid[1];
+    Object->Gid = Object->Cgid = LxCred(Process)->Gid[1];
     Object->Mode = Flags & 0777;
     Object->Ctime = LxIpcNow();
     InitializeListHead(&Object->Waiters);
@@ -348,11 +348,11 @@ LxIpcInGroup(
 {
     ULONG Index;
 
-    if (Process->Gid[1] == Gid)
+    if (LxCred(Process)->Gid[1] == Gid)
         return TRUE;
-    for (Index = 0; Index < Process->GroupCount; Index++)
+    for (Index = 0; Index < LxCred(Process)->GroupCount; Index++)
     {
-        if (Process->Groups[Index] == Gid)
+        if (LxCred(Process)->Groups[Index] == Gid)
             return TRUE;
     }
     return FALSE;
@@ -368,7 +368,7 @@ LxIpcCheck(
     ULONG Requested = (Flags >> 6) | (Flags >> 3) | Flags;
     ULONG Granted = Object->Mode;
 
-    if ((Process->Uid[1] == Object->Cuid) || (Process->Uid[1] == Object->Uid))
+    if ((LxCred(Process)->Uid[1] == Object->Cuid) || (LxCred(Process)->Uid[1] == Object->Uid))
         Granted >>= 6;
     else if (LxIpcInGroup(Process, Object->Cgid) || LxIpcInGroup(Process, Object->Gid))
         Granted >>= 3;
@@ -386,7 +386,7 @@ LxIpcOwner(
     _In_ PLX_PROCESS Process,
     _In_ PLX_IPC_OBJECT Object)
 {
-    return (Process->Uid[1] == Object->Uid) || (Process->Uid[1] == Object->Cuid) ||
+    return (LxCred(Process)->Uid[1] == Object->Uid) || (LxCred(Process)->Uid[1] == Object->Cuid) ||
            LxNsCapable(Process, LxNsOwner(Object->Namespace->Owner), LX_CAP_SYS_ADMIN);
 }
 

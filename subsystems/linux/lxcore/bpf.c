@@ -562,7 +562,7 @@ LxBpfProgLoad(
     Prog->Type = Type;
     Prog->ExpectedAttachType = ExpectedAttach;
     Prog->InsnCount = Count;
-    Prog->Uid = Call->Process->Uid[1];
+    Prog->Uid = LxCred(Call->Process)->Uid[1];
     Prog->Gpl = (License != NULL) && LxBpfLicenseIsGpl(License);
     Prog->LoadTime = (LONG64)KeQueryInterruptTime() * 100;
     if (Size >= 64)

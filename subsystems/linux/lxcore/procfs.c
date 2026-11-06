@@ -1170,6 +1170,7 @@ LxGenPidStatus(
 {
     PLX_PROCESS Process = LxProcessLookup(Self->Instance, Synth->Pid);
     PLX_NS ProcNs;
+    LX_CRED Cred;
     ULONG64 Ignored = 0, Caught = 0, Blocked = 0, Affinity = LxSchedActiveMask();
     ULONG SeccompMode = 0, SeccompFilters = 0;
     LONG64 Spec = -LX_EINVAL;
@@ -1184,6 +1185,7 @@ LxGenPidStatus(
     if (Process == NULL)
         return;
     ExAcquireFastMutex(&Process->Lock);
+    Cred = Process->Cred;
     RtlCopyMemory(Comm, Process->Comm, sizeof(Comm));
     Comm[15] = '\0';
     for (Signal = 0; Signal < LX_NSIG; Signal++)
@@ -1199,6 +1201,8 @@ LxGenPidStatus(
 
         if ((Synth->Tid == 0) || (Thread->Tid == Synth->Tid))
         {
+            if (Synth->Tid != 0)
+                Cred = Thread->Cred;
             Blocked = Thread->SigMask;
             Affinity &= Thread->Affinity;
             SeccompMode = Thread->SeccompMode;
@@ -1228,12 +1232,12 @@ LxGenPidStatus(
                  LxPidNrIn(ProcNs, Process),
                  LxGlobalToNrIn(ProcNs, Synth->Tid ? Synth->Tid : Process->Pid),
                  LxPidNsIsInit(Process) ? 0UL : LxGlobalToNrIn(ProcNs, Process->ParentPid), TracerPid,
-                 LxCredViewId(Self, FALSE, Process->Uid[0]), LxCredViewId(Self, FALSE, Process->Uid[1]),
-                 LxCredViewId(Self, FALSE, Process->Uid[2]), LxCredViewId(Self, FALSE, Process->Fsuid),
-                 LxCredViewId(Self, TRUE, Process->Gid[0]), LxCredViewId(Self, TRUE, Process->Gid[1]),
-                 LxCredViewId(Self, TRUE, Process->Gid[2]), LxCredViewId(Self, TRUE, Process->Fsgid), max(Fds, 64UL));
-    for (Index = 0; Index < Process->GroupCount; Index++)
-        LxTextPrintf(Text, "%lu ", LxCredViewId(Self, TRUE, Process->Groups[Index]));
+                 LxCredViewId(Self, FALSE, Cred.Uid[0]), LxCredViewId(Self, FALSE, Cred.Uid[1]),
+                 LxCredViewId(Self, FALSE, Cred.Uid[2]), LxCredViewId(Self, FALSE, Cred.Fsuid),
+                 LxCredViewId(Self, TRUE, Cred.Gid[0]), LxCredViewId(Self, TRUE, Cred.Gid[1]),
+                 LxCredViewId(Self, TRUE, Cred.Gid[2]), LxCredViewId(Self, TRUE, Cred.Fsgid), max(Fds, 64UL));
+    for (Index = 0; Index < Cred.GroupCount; Index++)
+        LxTextPrintf(Text, "%lu ", LxCredViewId(Self, TRUE, Cred.Groups[Index]));
     LxTextAppend(Text, "\n", 1);
     {
         static const PCSTR Labels[4] = { "NStgid", "NSpid", "NSpgid", "NSsid" };
@@ -1325,9 +1329,9 @@ LxGenPidStatus(
                  "NoNewPrivs:\t%u\nSeccomp:\t%lu\nSeccomp_filters:\t%lu\nSpeculation_Store_Bypass:\t%s\n"
                  "SpeculationIndirectBranch:\tunknown\nCpus_allowed:\t%llx\nCpus_allowed_list:\t%s\n"
                  "Mems_allowed:\t1\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t0\nnonvoluntary_ctxt_switches:\t0\n",
-                 0ULL, (ULONG64)Process->Pending, Blocked, Ignored, Caught, Process->CapInheritable,
-                 Process->CapPermitted, Process->CapEffective,
-                 Process->CapBounding, Process->CapAmbient, Process->NoNewPrivs ? 1U : 0U, SeccompMode, SeccompFilters,
+                 0ULL, (ULONG64)Process->Pending, Blocked, Ignored, Caught, Cred.CapInheritable,
+                 Cred.CapPermitted, Cred.CapEffective,
+                 Cred.CapBounding, Cred.CapAmbient, Process->NoNewPrivs ? 1U : 0U, SeccompMode, SeccompFilters,
                  SpecText, Affinity, List);
     LxProcessDereference(Process);
 }
@@ -6836,8 +6840,8 @@ LxSynthStat(
 
         if (Target != NULL)
         {
-            Stat->Uid = Target->Uid[1];
-            Stat->Gid = Target->Gid[1];
+            Stat->Uid = Target->Cred.Uid[1];
+            Stat->Gid = Target->Cred.Gid[1];
             if (Synth.Id == LxProcTaskDir)
                 Stat->Nlink = 2 + (Target->Exited ? 1 : (ULONG)max(Target->ThreadCount, 1));
             LxProcessDereference(Target);
@@ -6909,8 +6913,8 @@ LxSynthMkdir(
         return -LX_ENOMEM;
     if (Child->Instance == NULL)
         Child->Instance = Process->Instance;
-    Child->Uid = Child->FileUid = Process->Fsuid;
-    Child->Gid = Child->FileGid = Process->Fsgid;
+    Child->Uid = Child->FileUid = LxCred(Process)->Fsuid;
+    Child->Gid = Child->FileGid = LxCred(Process)->Fsgid;
     return 0;
 }
 
@@ -6949,21 +6953,21 @@ LxCgroupSetAttributes(
     LxFree(Synth.LinkTarget);
     if ((Synth.Id != LxCgDir) && (Synth.Id != LxCgFile))
         return 0;
-    if ((Uid != MAXULONG) && !((Process->Fsuid == Synth.Uid) && (Uid == Synth.Uid)) &&
+    if ((Uid != MAXULONG) && !((LxCred(Process)->Fsuid == Synth.Uid) && (Uid == Synth.Uid)) &&
         !LxCapable(Process, LX_CAP_CHOWN))
     {
         return -LX_EPERM;
     }
     if ((Gid != MAXULONG) && !LxCapable(Process, LX_CAP_CHOWN))
     {
-        BOOLEAN Allowed = (Process->Fsuid == Synth.Uid) && ((Gid == Synth.Gid) || (Gid == Process->Fsgid));
+        BOOLEAN Allowed = (LxCred(Process)->Fsuid == Synth.Uid) && ((Gid == Synth.Gid) || (Gid == LxCred(Process)->Fsgid));
 
-        for (Index = 0; !Allowed && (Process->Fsuid == Synth.Uid) && (Index < Process->GroupCount); Index++)
-            Allowed = (Process->Groups[Index] == Gid);
+        for (Index = 0; !Allowed && (LxCred(Process)->Fsuid == Synth.Uid) && (Index < LxCred(Process)->GroupCount); Index++)
+            Allowed = (LxCred(Process)->Groups[Index] == Gid);
         if (!Allowed)
             return -LX_EPERM;
     }
-    if ((Mode != MAXULONG) && (Process->Fsuid != Synth.Uid) && !LxCapable(Process, LX_CAP_FOWNER))
+    if ((Mode != MAXULONG) && (LxCred(Process)->Fsuid != Synth.Uid) && !LxCapable(Process, LX_CAP_FOWNER))
         return -LX_EPERM;
 
     New = (Synth.Id == LxCgFile) ? LxAlloc(sizeof(*New)) : NULL;
