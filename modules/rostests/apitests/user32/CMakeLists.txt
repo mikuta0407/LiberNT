@@ -22,6 +22,7 @@ list(APPEND SOURCE
     DisplayChangeDesktops.c
     DisplayChangeMaximized.c
     DisplayDeviceAttach.c
+    DisplayClone.c
     DisplayDeviceRemoval.c
     DisplayTopology.c
     ForegroundLastInput.c

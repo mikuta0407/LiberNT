@@ -19,6 +19,7 @@ extern void func_DisplayChangeBroadcast(void);
 extern void func_DisplayChangeDesktops(void);
 extern void func_DisplayChangeMaximized(void);
 extern void func_DisplayDeviceAttach(void);
+extern void func_DisplayClone(void);
 extern void func_DisplayDeviceRemoval(void);
 extern void func_DisplayTopology(void);
 extern void func_ForegroundLastInput(void);
@@ -163,6 +164,7 @@ const struct test winetest_testlist[] =
     { "DisplayChangeDesktops", func_DisplayChangeDesktops },
     { "DisplayChangeMaximized", func_DisplayChangeMaximized },
     { "DisplayDeviceAttach", func_DisplayDeviceAttach },
+    { "DisplayClone", func_DisplayClone },
     { "DisplayDeviceRemoval", func_DisplayDeviceRemoval },
     { "DisplayTopology", func_DisplayTopology },
     { "ForegroundLastInput", func_ForegroundLastInput },
