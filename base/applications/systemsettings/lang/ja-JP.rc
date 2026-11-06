@@ -780,4 +780,8 @@ BEGIN
     IDS_REMOTE_DESKTOP_PC_NAME "PC 名"
     IDS_REMOTE_DESKTOP_PC_NAME_DESC "別のデバイスからこの PC に接続するときは、この名前を使います"
     IDS_REMOTE_DESKTOP_PORT "リモート デスクトップ ポート"
+    IDS_REMOTE_DESKTOP_DISPLAY "クライアントの接続時"
+    IDS_REMOTE_DESKTOP_DISPLAY_DESC "リモート デスクトップ接続中に、この PC の画面をどうするかを選びます"
+    IDS_REMOTE_DESKTOP_DISPLAY_LOCK "この PC をロックしてリモート用の画面を使う"
+    IDS_REMOTE_DESKTOP_DISPLAY_CLONE "この PC の画面をクライアントに表示する"
 END
