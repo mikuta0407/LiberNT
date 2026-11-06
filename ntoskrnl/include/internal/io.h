@@ -863,6 +863,10 @@ IopFreeDeviceNode(
     IN PDEVICE_NODE DeviceNode
 );
 
+VOID
+PiCancelDeviceLeakCheck(
+    _In_ PDEVICE_OBJECT DeviceObject);
+
 NTSTATUS
 NTAPI
 IopQueryDeviceCapabilities(PDEVICE_NODE DeviceNode,
