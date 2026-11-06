@@ -2308,6 +2308,7 @@ PiSetDeviceStackRemovePending(
 
 typedef struct _PIP_LEAK_CHECK
 {
+    LIST_ENTRY Link;
     PDEVICE_OBJECT DeviceObject;
     UNICODE_STRING InstancePath;
     KTIMER Timer;
@@ -2317,6 +2318,9 @@ typedef struct _PIP_LEAK_CHECK
 
 #define PIP_LEAK_CHECK_DELAY_SECONDS 30
 
+static LIST_ENTRY PipLeakCheckList = { &PipLeakCheckList, &PipLeakCheckList };
+static KSPIN_LOCK PipLeakCheckLock;
+
 static
 VOID
 NTAPI
@@ -2324,12 +2328,24 @@ PipLeakCheckWorker(
     _In_ PVOID Context)
 {
     PPIP_LEAK_CHECK Check = Context;
-    LONG_PTR References = OBJECT_TO_OBJECT_HEADER(Check->DeviceObject)->PointerCount - 1;
+    PDEVICE_OBJECT DeviceObject;
+    LONG_PTR References = 0;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&PipLeakCheckLock, &OldIrql);
+    RemoveEntryList(&Check->Link);
+    DeviceObject = Check->DeviceObject;
+    if (DeviceObject != NULL && ObReferenceObjectSafe(DeviceObject))
+        References = OBJECT_TO_OBJECT_HEADER(DeviceObject)->PointerCount - 1;
+    else
+        DeviceObject = NULL;
+    KeReleaseSpinLock(&PipLeakCheckLock, OldIrql);
 
     if (References != 0)
         DPRINT1("Leaking device %wZ, refCount = %d\n", &Check->InstancePath, (INT32)References);
 
-    ObDereferenceObject(Check->DeviceObject);
+    if (DeviceObject != NULL)
+        ObDereferenceObject(DeviceObject);
     ExFreePoolWithTag(Check->InstancePath.Buffer, TAG_IO);
     ExFreePoolWithTag(Check, TAG_IO);
 }
@@ -2360,6 +2376,7 @@ PipQueueLeakCheck(
 {
     PPIP_LEAK_CHECK Check;
     LARGE_INTEGER DueTime;
+    KIRQL OldIrql;
 
     Check = ExAllocatePoolZero(NonPagedPool, sizeof(*Check), TAG_IO);
     if (Check == NULL)
@@ -2376,13 +2393,33 @@ PipQueueLeakCheck(
     Check->InstancePath.Length = InstancePath->Length;
     Check->InstancePath.MaximumLength = InstancePath->Length;
     Check->DeviceObject = DeviceObject;
-    ObReferenceObject(DeviceObject);
 
     ExInitializeWorkItem(&Check->WorkItem, PipLeakCheckWorker, Check);
     KeInitializeDpc(&Check->Dpc, PipLeakCheckDpc, Check);
     KeInitializeTimer(&Check->Timer);
     DueTime.QuadPart = -(LONGLONG)PIP_LEAK_CHECK_DELAY_SECONDS * 10000000;
+    KeAcquireSpinLock(&PipLeakCheckLock, &OldIrql);
+    InsertTailList(&PipLeakCheckList, &Check->Link);
     KeSetTimer(&Check->Timer, DueTime, &Check->Dpc);
+    KeReleaseSpinLock(&PipLeakCheckLock, OldIrql);
+}
+
+VOID
+PiCancelDeviceLeakCheck(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PLIST_ENTRY Link;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&PipLeakCheckLock, &OldIrql);
+    for (Link = PipLeakCheckList.Flink; Link != &PipLeakCheckList; Link = Link->Flink)
+    {
+        PPIP_LEAK_CHECK Check = CONTAINING_RECORD(Link, PIP_LEAK_CHECK, Link);
+
+        if (Check->DeviceObject == DeviceObject)
+            Check->DeviceObject = NULL;
+    }
+    KeReleaseSpinLock(&PipLeakCheckLock, OldIrql);
 }
 
 static
