@@ -361,6 +361,10 @@ typedef struct _LX_SCHED_ATTR
 #define LX_TCSETS           0x5402
 #define LX_TCSETSW          0x5403
 #define LX_TCSETSF          0x5404
+#define LX_TCGETA           0x5405
+#define LX_TCSETA           0x5406
+#define LX_TCSETAW          0x5407
+#define LX_TCSETAF          0x5408
 #define LX_TCSBRK           0x5409
 #define LX_TCXONC           0x540A
 #define LX_TCFLSH           0x540B
@@ -371,12 +375,19 @@ typedef struct _LX_SCHED_ATTR
 #define LX_TIOCGWINSZ       0x5413
 #define LX_TIOCSWINSZ       0x5414
 #define LX_FIONREAD         0x541B
+#define LX_TIOCPKT          0x5420
 #define LX_TIOCNOTTY        0x5422
+#define LX_TIOCSETD         0x5423
+#define LX_TIOCGETD         0x5424
+#define LX_TCSBRKP          0x5425
+#define LX_TIOCSBRK         0x5427
+#define LX_TIOCCBRK         0x5428
 #define LX_TIOCGSID         0x5429
 #define LX_TIOCGPTN         0x80045430
 #define LX_TIOCSPTLCK       0x40045431
 #define LX_TIOCGPTPEER      0x5441
 #define LX_TIOCVHANGUP      0x5437
+#define LX_TIOCGPKT         0x80045438
 #define LX_TIOCEXCL         0x540C
 #define LX_TIOCNXCL         0x540D
 #define LX_TIOCSTI          0x5412
@@ -408,13 +419,39 @@ typedef struct _LX_SCHED_ATTR
 #define LX_VLNEXT           15
 #define LX_VEOL2            16
 #define LX_KERNEL_NCCS      19
+#define LX_NCC              8
+#define LX_N_TTY            0
+#define LX_TCOOFF           0
+#define LX_TCOON            1
+#define LX_TCIOFF           2
+#define LX_TCION            3
+#define LX_TCIFLUSH         0
+#define LX_TCOFLUSH         1
+#define LX_TCIOFLUSH        2
+#define LX_TIOCPKT_FLUSHREAD  0x01
+#define LX_TIOCPKT_FLUSHWRITE 0x02
+#define LX_TIOCPKT_STOP       0x04
+#define LX_TIOCPKT_START      0x08
+#define LX_TIOCPKT_NOSTOP     0x10
+#define LX_TIOCPKT_DOSTOP     0x20
+#define LX_TIOCPKT_IOCTL      0x40
 
+#define LX_ISTRIP           0000040
 #define LX_INLCR            0000100
 #define LX_IGNCR            0000200
 #define LX_ICRNL            0000400
+#define LX_IUCLC            0001000
 #define LX_IXON             0002000
+#define LX_IXANY            0004000
+#define LX_IUTF8            0040000
 #define LX_OPOST            0000001
+#define LX_OLCUC            0000002
 #define LX_ONLCR            0000004
+#define LX_OCRNL            0000010
+#define LX_ONOCR            0000020
+#define LX_ONLRET           0000040
+#define LX_TABDLY           0014000
+#define LX_XTABS            0014000
 #define LX_B38400           0000017
 #define LX_CS8              0000060
 #define LX_CREAD            0000200
@@ -430,6 +467,7 @@ typedef struct _LX_SCHED_ATTR
 #define LX_IEXTEN           0100000
 #define LX_ECHOCTL          0001000
 #define LX_ECHOKE           0004000
+#define LX_EXTPROC          0200000
 
 #define LX_SIGHUP           1
 #define LX_SIGINT           2
@@ -1102,6 +1140,18 @@ typedef struct _LX_TERMIOS
 } LX_TERMIOS, *PLX_TERMIOS;
 
 C_ASSERT(sizeof(LX_TERMIOS) == 36);
+
+typedef struct _LX_TERMIO
+{
+    USHORT Iflag;
+    USHORT Oflag;
+    USHORT Cflag;
+    USHORT Lflag;
+    UCHAR Line;
+    UCHAR Cc[LX_NCC];
+} LX_TERMIO, *PLX_TERMIO;
+
+C_ASSERT(sizeof(LX_TERMIO) == 18);
 
 typedef struct _LX_WINSIZE
 {
