@@ -116,6 +116,7 @@ list(APPEND SOURCE
     WindowRegionFrame.c
     ShellWindowQueries.c
     ShowWindow.c
+    SwitchDesktopActivate.c
     SwitchToThisWindow.c
     SystemMenu.c
     TopmostBand.c
