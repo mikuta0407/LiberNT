@@ -63,13 +63,15 @@ static HSWDEVICE RemoteDisplay;
 static LONG RemoteDisplayUsers;
 static HANDLE RemoteDisplayReady;
 static WCHAR RemoteDisplayInstance[MAX_DEVICE_ID_LEN];
-static BOOL RemoteDisplayShown;
+static BOOL RemoteDisplayShown, RemoteDisplayCloned;
 static HANDLE RemoteConsole;
 
 #define SERVICE_NAME "LiberNTRDPServer"
 #define SERVICE_STOP_EVENT "Global\\LiberNT-RDPServer-Stop"
 #define TERMINAL_SERVER_KEY "SYSTEM\\CurrentControlSet\\Control\\Terminal Server"
 #define WINSTATIONS_KEY TERMINAL_SERVER_KEY "\\WinStations"
+#define PARAMETERS_KEY "SYSTEM\\CurrentControlSet\\Services\\" SERVICE_NAME "\\Parameters"
+#define REMOTE_DISPLAY_CLONE 1
 #define CERTIFICATE_DAYS 183
 #define TILE_BATCH 64
 #define TILE_WIDTH 64
@@ -631,6 +633,34 @@ static BOOL ConsoleSignedIn(void)
     return InterlockedCompareExchange(&ConsoleTakeover, 0, 0) != 0;
 }
 
+static BOOL CloneModeSelected(void)
+{
+    DWORD mode = 0, size = sizeof(mode), type;
+    HKEY key;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, PARAMETERS_KEY, 0, KEY_QUERY_VALUE, &key)) return FALSE;
+    if (RegQueryValueExA(key, "RemoteDisplayMode", NULL, &type, (BYTE *)&mode, &size) || type != REG_DWORD) mode = 0;
+    RegCloseKey(key);
+    return mode == REMOTE_DISPLAY_CLONE;
+}
+
+static BOOL CloneToRemoteDisplay(DESKTOP_CONTEXT *ctx)
+{
+    LONG result = ERROR_GEN_FAILURE;
+    int attempt;
+    if (SetRemoteDisplayMode(ctx->ClientWidth, ctx->ClientHeight) &&
+        !WaitForRemoteDisplay(ctx->ClientWidth, ctx->ClientHeight))
+        Log("The remote display does not list %dx%d", ctx->ClientWidth, ctx->ClientHeight);
+    /* A miniport reporting its new monitor mode can fail the first attempt. */
+    for (attempt = 0; attempt < 3; ++attempt)
+    {
+        result = SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_CLONE);
+        if (result == ERROR_SUCCESS) break;
+        Sleep(500);
+    }
+    Log("Desktop cloned to the remote display: %ld", result);
+    return result == ERROR_SUCCESS;
+}
+
 static UINT32 AcquireRemoteDisplay(DESKTOP_CONTEXT *ctx)
 {
     static const WCHAR hardwareIds[] = L"RdpVdd_RemoteDisplay\0";
@@ -656,6 +686,7 @@ static UINT32 AcquireRemoteDisplay(DESKTOP_CONTEXT *ctx)
         info.pszDeviceDescription = L"LiberNT Remote Display Adapter";
         ResetEvent(RemoteDisplayReady);
         InterlockedExchange(&ConsoleTakeover, FALSE);
+        RemoteDisplayCloned = CloneModeSelected();
         hr = SwDeviceCreate(L"RemoteDisplayEnum", L"HTREE\\ROOT\\0", &info, 0, NULL,
                             RemoteDisplayCreated, NULL, &RemoteDisplay);
         if (FAILED(hr))
@@ -664,7 +695,18 @@ static UINT32 AcquireRemoteDisplay(DESKTOP_CONTEXT *ctx)
             RemoteDisplay = NULL;
             error = ERRINFO_CLOSE_STACK_ON_DRIVER_FAILURE;
         }
-        else if (WaitForSingleObject(RemoteDisplayReady, 15000) == WAIT_OBJECT_0 && WaitForRemoteDisplay(0, 0))
+        else if (WaitForSingleObject(RemoteDisplayReady, 15000) != WAIT_OBJECT_0 || !WaitForRemoteDisplay(0, 0))
+        {
+            Log("The remote display adapter did not start");
+            error = ERRINFO_CLOSE_STACK_ON_DRIVER_NOT_READY;
+        }
+        else if (RemoteDisplayCloned)
+        {
+            RemoteDisplayShown = CloneToRemoteDisplay(ctx);
+            if (!RemoteDisplayShown)
+                error = ERRINFO_CLOSE_STACK_ON_DRIVER_FAILURE;
+        }
+        else
         {
             if (SetRemoteDisplayMode(width, height) && !WaitForRemoteDisplay(width, height))
                 Log("The remote display does not list %dx%d", width, height);
@@ -675,13 +717,10 @@ static UINT32 AcquireRemoteDisplay(DESKTOP_CONTEXT *ctx)
                      !WaitForRemoteDisplayMode(ctx->ClientWidth, ctx->ClientHeight))
                 Log("The desktop did not take the %dx%d mode", ctx->ClientWidth, ctx->ClientHeight);
         }
-        else
-        {
-            Log("The remote display adapter did not start");
-            error = ERRINFO_CLOSE_STACK_ON_DRIVER_NOT_READY;
-        }
         if (error && RemoteDisplay)
         {
+            if (RemoteDisplayCloned)
+                SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_INTERNAL);
             SwDeviceClose(RemoteDisplay);
             RemoteDisplay = NULL;
             Log("Remote display adapter closed");
@@ -744,7 +783,11 @@ static void ReleaseRemoteDisplay(DESKTOP_CONTEXT *ctx)
     if (!--RemoteDisplayUsers)
     {
         RemoteDisplayShown = FALSE;
-        DisconnectRemoteConsole(InterlockedExchange(&ConsoleTakeover, FALSE) != 0);
+        if (RemoteDisplayCloned)
+            Log("Desktop back to the console display: %ld",
+                SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_INTERNAL));
+        else
+            DisconnectRemoteConsole(InterlockedExchange(&ConsoleTakeover, FALSE) != 0);
         SwDeviceClose(RemoteDisplay);
         RemoteDisplay = NULL;
         Log("Remote display adapter closed");
