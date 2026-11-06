@@ -722,6 +722,7 @@ BuildMultitasking(PageBuilder &page)
 
 #define TERMINAL_SERVER_KEY L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server"
 #define RDP_SERVICE_KEY L"SYSTEM\\CurrentControlSet\\Services\\LiberNTRDPServer"
+#define RDP_PARAMETERS_KEY RDP_SERVICE_KEY L"\\Parameters"
 
 void
 BuildRemoteDesktop(PageBuilder &page)
@@ -746,6 +747,17 @@ BuildRemoteDesktop(PageBuilder &page)
                 }).Enabled = installed && IsAdmin();
     if (!installed)
         page.Text(Str(IDS_REMOTE_DESKTOP_MISSING));
+    std::vector<std::wstring> displays;
+    displays.push_back(Str(IDS_REMOTE_DESKTOP_DISPLAY_LOCK));
+    displays.push_back(Str(IDS_REMOTE_DESKTOP_DISPLAY_CLONE));
+    page.Choice(Str(IDS_REMOTE_DESKTOP_DISPLAY), Str(IDS_REMOTE_DESKTOP_DISPLAY_DESC), L"desktop_20_regular", displays,
+                !page.Indexing && ReadDword(HKEY_LOCAL_MACHINE, RDP_PARAMETERS_KEY, L"RemoteDisplayMode", 0) == 1,
+                [host](int index)
+                {
+                    if (!WriteDword(HKEY_LOCAL_MACHINE, RDP_PARAMETERS_KEY, L"RemoteDisplayMode", index == 1 ? 1 : 0))
+                        ShowError(host->Window(), ERROR_ACCESS_DENIED);
+                    host->Refresh();
+                }).Enabled = installed && IsAdmin();
     page.Group();
     page.Info(Str(IDS_REMOTE_DESKTOP_PC_NAME), ComputerName(), L"desktop_20_regular").Detail =
         Str(IDS_REMOTE_DESKTOP_PC_NAME_DESC);
