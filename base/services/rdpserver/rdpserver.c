@@ -579,10 +579,13 @@ static BOOL ConnectRemoteConsole(DESKTOP_CONTEXT *ctx)
     DWORD session = 0, bytes, mode = PIPE_READMODE_MESSAGE;
     const char *user = freerdp_settings_get_string(ctx->rdp.settings, FreeRDP_Username);
     const char *domain = freerdp_settings_get_string(ctx->rdp.settings, FreeRDP_Domain);
+    const char *password = freerdp_settings_get_string(ctx->rdp.settings, FreeRDP_Password);
     ProcessIdToSessionId(GetCurrentProcessId(), &session);
     _snwprintf(pipe, ARRAYSIZE(pipe), REMOTE_CONSOLE_PIPE_FORMAT, session);
     pipe[ARRAYSIZE(pipe) - 1] = 0;
     RemoteConsole = CreateFileW(pipe, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (RemoteConsole == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY && WaitNamedPipeW(pipe, 10000))
+        RemoteConsole = CreateFileW(pipe, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (RemoteConsole == INVALID_HANDLE_VALUE)
     {
         Log("Cannot reach Winlogon: %lu", GetLastError());
@@ -594,8 +597,10 @@ static BOOL ConnectRemoteConsole(DESKTOP_CONTEXT *ctx)
     message.Connection = (ULONG)InterlockedIncrement(&ConnectionNumber) - 1;
     if (user) MultiByteToWideChar(CP_UTF8, 0, user, -1, message.UserName, ARRAYSIZE(message.UserName) - 1);
     if (domain) MultiByteToWideChar(CP_UTF8, 0, domain, -1, message.Domain, ARRAYSIZE(message.Domain) - 1);
+    if (password) MultiByteToWideChar(CP_UTF8, 0, password, -1, message.Password, ARRAYSIZE(message.Password) - 1);
     if (!WriteFile(RemoteConsole, &message, sizeof(message), &bytes, NULL) || !CallRemoteConsole(&message))
         message.Status = ERROR_BROKEN_PIPE;
+    SecureZeroMemory(message.Password, sizeof(message.Password));
     Log("Session handed to RDP-Tcp#%lu: %lu", message.Connection, message.Status);
     if (message.Status == ERROR_SUCCESS) return TRUE;
     CloseHandle(RemoteConsole);

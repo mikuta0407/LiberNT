@@ -17,6 +17,7 @@ PTHREADINFO gptiForeground = NULL;
 PPROCESSINFO gppiLockSFW = NULL;
 ULONG guSFWLockCount = 0; // Rule #8, No menus are active. So should be zero.
 PTHREADINFO ptiLastInput = NULL;
+PPROCESSINFO gppiLastInput = NULL;
 HWND ghwndOldFullscreen = NULL;
 
 static VOID FASTCALL
@@ -1902,7 +1903,7 @@ IntCanStartForeground(PEPROCESS Process)
 
    if (ppi &&
        (gptiForeground->ppi == ppi ||
-        (ptiLastInput && ptiLastInput->ppi == ppi) ||
+        gppiLastInput == ppi ||
         gppiInputProvider == ppi ||
         (ppi->W32PF_flags & (W32PF_ALLOWFOREGROUNDACTIVATE | W32PF_CONSOLEFOREGROUND))))
    {
