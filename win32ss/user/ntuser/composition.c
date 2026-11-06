@@ -312,6 +312,7 @@ IntCompositionReleaseGpuOutput(_In_ BOOL Force)
     return Status;
 }
 
+/* TODO: present to the outputs of the clone targets too; the GPU output covers the primary source only */
 static NTSTATUS
 IntCompositionClaimGpuOutput(_In_ const DWM_GPU_OUTPUT *Request)
 {

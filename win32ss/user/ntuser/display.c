@@ -271,6 +271,41 @@ UserFindDisplaySettingsDevice(
     return pGraphicsDevice ? pGraphicsDevice : EngpFindGraphicsDevice(NULL, 0);
 }
 
+static
+PVIDEO_MONITOR_DEVICE
+UserFindMonitorDevice(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice,
+    _In_ PUNICODE_STRING pustrDevice,
+    _In_ DWORD iDevNum)
+{
+    PGRAPHICS_DEVICE apTargets[4];
+    PPDEVOBJ ppdev;
+    ULONG i, cTargets = 0;
+
+    if (MultiCloneIsTarget(pGraphicsDevice))
+        return NULL;
+
+    EngpUpdateMonitorDevices(pGraphicsDevice);
+    if (iDevNum < pGraphicsDevice->dwMonCnt)
+        return &pGraphicsDevice->pvMonDev[iDevNum];
+    iDevNum -= pGraphicsDevice->dwMonCnt;
+
+    ppdev = EngpGetPDEV(pustrDevice);
+    if (ppdev)
+    {
+        cTargets = MultiCloneGetTargets(ppdev, apTargets, RTL_NUMBER_OF(apTargets));
+        PDEVOBJ_vRelease(ppdev);
+    }
+    for (i = 0; i < cTargets; i++)
+    {
+        EngpUpdateMonitorDevices(apTargets[i]);
+        if (iDevNum < apTargets[i]->dwMonCnt)
+            return &apTargets[i]->pvMonDev[iDevNum];
+        iDevNum -= apTargets[i]->dwMonCnt;
+    }
+    return NULL;
+}
+
 NTSTATUS
 NTAPI
 UserEnumDisplayDevices(
@@ -280,6 +315,7 @@ UserEnumDisplayDevices(
     DWORD dwFlags)
 {
     PGRAPHICS_DEVICE pGraphicsDevice, pRemoteDevice;
+    PVIDEO_MONITOR_DEVICE pMonitorDevice = NULL;
     PDEVICE_OBJECT pdo;
     PWCHAR pHardwareId;
     ULONG cbSize, dwLength;
@@ -316,13 +352,13 @@ UserEnumDisplayDevices(
     }
     else
     {
-        EngpUpdateMonitorDevices(pGraphicsDevice);
-        if (iDevNum >= pGraphicsDevice->dwMonCnt)
+        pMonitorDevice = UserFindMonitorDevice(pGraphicsDevice, pustrDevice, iDevNum);
+        if (!pMonitorDevice)
         {
             TRACE("No monitor #%u for '%wZ'\n", iDevNum + 1, pustrDevice);
             return STATUS_UNSUCCESSFUL;
         }
-        pdo = pGraphicsDevice->pvMonDev[iDevNum].pdo;
+        pdo = pMonitorDevice->pdo;
     }
 
 
@@ -368,7 +404,7 @@ UserEnumDisplayDevices(
             if (!NT_SUCCESS(Status))
                 pdispdev->DeviceString[0] = UNICODE_NULL;
         }
-        pdispdev->StateFlags = pGraphicsDevice->pvMonDev[iDevNum].flag;
+        pdispdev->StateFlags = pMonitorDevice->flag;
     }
     pdispdev->DeviceID[0] = UNICODE_NULL;
 
@@ -1230,6 +1266,112 @@ UserMoveDesktopDisplay(
 }
 
 static
+BOOL
+UserIsCloneCandidate(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice,
+    _In_ PPDEVOBJ ppdevSource)
+{
+    return pGraphicsDevice != ppdevSource->pGraphicsDevice &&
+           pGraphicsDevice != ppdevSource->pGraphicsDevice->pVgaDevice &&
+           !(pGraphicsDevice->StateFlags & (DISPLAY_DEVICE_MIRRORING_DRIVER | DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) &&
+           !MultiCloneIsTarget(pGraphicsDevice);
+}
+
+static
+BOOL
+UserCloneDisplays(
+    _In_ PPDEVOBJ ppdevSource,
+    _Out_ PBOOL pbFailed)
+{
+    PGRAPHICS_DEVICE apDevices[4];
+    PGRAPHICS_DEVICE pGraphicsDevice;
+    PPDEVOBJ ppdev;
+    ULONG i, cDevices = 0;
+    BOOL bChanged = FALSE;
+
+    for (i = 0; cDevices < RTL_NUMBER_OF(apDevices) && (pGraphicsDevice = EngpFindGraphicsDevice(NULL, i)) != NULL; i++)
+    {
+        if (UserIsCloneCandidate(pGraphicsDevice, ppdevSource))
+            apDevices[cDevices++] = pGraphicsDevice;
+    }
+
+    for (i = 0; i < cDevices; i++)
+    {
+        ppdev = PDEVOBJ_CreateCloneTarget(apDevices[i]);
+        if (!ppdev)
+        {
+            ERR("Could not enable %S as a clone target\n", apDevices[i]->szWinDeviceName);
+            continue;
+        }
+        if (!MultiCloneAttach(ppdevSource, ppdev))
+        {
+            ERR("Could not clone the desktop to %S\n", apDevices[i]->szWinDeviceName);
+            PDEVOBJ_vRelease(ppdev);
+            continue;
+        }
+        bChanged = TRUE;
+    }
+    *pbFailed = cDevices != 0 && !bChanged;
+    return bChanged;
+}
+
+static
+BOOL
+UserUncloneDisplays(
+    _In_opt_ PGRAPHICS_DEVICE pGraphicsDevice)
+{
+    PPDEVOBJ ppdev;
+    BOOL bChanged = FALSE;
+
+    while ((ppdev = MultiCloneDetach(pGraphicsDevice)) != NULL)
+    {
+        PDEVOBJ_vRelease(ppdev);
+        bChanged = TRUE;
+        if (pGraphicsDevice)
+            break;
+    }
+    return bChanged;
+}
+
+BOOL
+NTAPI
+UserDetachCloneTarget(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice)
+{
+    if (!MultiCloneIsTarget(pGraphicsDevice) || !UserUncloneDisplays(pGraphicsDevice))
+        return FALSE;
+    UserQueueDisplayTopologyChange();
+    return TRUE;
+}
+
+static
+VOID
+UserRefreshCloneTargets(VOID)
+{
+    PGRAPHICS_DEVICE apTargets[4];
+    PPDEVOBJ ppdevSource, ppdev;
+    ULONG i, cTargets;
+
+    ppdevSource = EngpGetPDEV(NULL);
+    if (!ppdevSource)
+        return;
+    cTargets = MultiCloneGetTargets(ppdevSource, apTargets, RTL_NUMBER_OF(apTargets));
+    for (i = 0; i < cTargets; i++)
+    {
+        UserUncloneDisplays(apTargets[i]);
+        ppdev = PDEVOBJ_CreateCloneTarget(apTargets[i]);
+        if (ppdev && !MultiCloneAttach(ppdevSource, ppdev))
+        {
+            PDEVOBJ_vRelease(ppdev);
+            ppdev = NULL;
+        }
+        if (!ppdev)
+            ERR("Lost clone target %S\n", apTargets[i]->szWinDeviceName);
+    }
+    PDEVOBJ_vRelease(ppdevSource);
+}
+
+static
 LONG
 UserSetDisplayTopology(
     _In_ UINT32 Topology,
@@ -1251,23 +1393,52 @@ UserSetDisplayTopology(
 
     if (Topology == SDC_TOPOLOGY_INTERNAL)
     {
+        if (bApply && UserUncloneDisplays(NULL))
+            UserNotifyDisplayChange(gpsi->BitCount, 0);
         if (bApply && gppdevDetached && !UserMoveDesktopDisplay(ppdev, NULL, NULL))
             lRet = ERROR_GEN_FAILURE;
         goto leave;
     }
 
-    if (Topology != SDC_TOPOLOGY_EXTERNAL)
+    EngpUpdateGraphicsDeviceList();
+    for (i = 0; (pGraphicsDevice = EngpFindGraphicsDevice(NULL, i)) != NULL; i++)
     {
-        /* TODO: clone and extend the desktop to other displays */
-        EngpUpdateGraphicsDeviceList();
-        for (i = 0; (pGraphicsDevice = EngpFindGraphicsDevice(NULL, i)) != NULL; i++)
-        {
-            if (UserIsExternalDisplay(pGraphicsDevice, ppdev))
-                break;
-        }
+        if (UserIsExternalDisplay(pGraphicsDevice, ppdev) || MultiCloneIsTarget(pGraphicsDevice))
+            break;
+    }
+
+    if (Topology == SDC_TOPOLOGY_EXTEND)
+    {
+        /* TODO: extend the desktop to other displays */
         lRet = (pGraphicsDevice || gppdevDetached) ? ERROR_NOT_SUPPORTED : ERROR_GEN_FAILURE;
         goto leave;
     }
+
+    if (Topology == SDC_TOPOLOGY_CLONE)
+    {
+        BOOL bFailed = FALSE;
+
+        if (!pGraphicsDevice && !gppdevDetached)
+        {
+            lRet = ERROR_GEN_FAILURE;
+            goto leave;
+        }
+        if (!bApply)
+            goto leave;
+        if (gppdevDetached && !UserMoveDesktopDisplay(ppdev, NULL, NULL))
+        {
+            lRet = ERROR_GEN_FAILURE;
+            goto leave;
+        }
+        if (UserCloneDisplays(ppdev, &bFailed))
+            UserNotifyDisplayChange(gpsi->BitCount, 0);
+        if (bFailed)
+            lRet = ERROR_GEN_FAILURE;
+        goto leave;
+    }
+
+    if (bApply && UserUncloneDisplays(NULL))
+        UserNotifyDisplayChange(gpsi->BitCount, 0);
 
     if (gppdevDetached)
         goto leave;
@@ -1331,6 +1502,7 @@ NtUserSetDisplayConfig(
 }
 
 static volatile LONG gUserDisplayConfigurationPending;
+static volatile LONG gUserDisplayTopologyChanged;
 static volatile LONG gUserDisplayConfigurationQueued;
 static volatile LONG gUserDisplayDetachPending;
 static WORK_QUEUE_ITEM gUserDisplayConfigurationWorkItem;
@@ -1387,6 +1559,14 @@ UserQueueDisplayDetach(VOID)
 
 VOID
 NTAPI
+UserQueueDisplayTopologyChange(VOID)
+{
+    InterlockedExchange(&gUserDisplayTopologyChanged, 1);
+    UserQueueDisplayConfigurationWorker();
+}
+
+VOID
+NTAPI
 co_UserProcessDisplayConfigurationUpdate(VOID)
 {
     PGRAPHICS_DEVICE pGraphicsDevice;
@@ -1405,8 +1585,13 @@ co_UserProcessDisplayConfigurationUpdate(VOID)
         EngpReleaseRemovedGraphicsDevices();
     }
 
+    if (InterlockedExchange(&gUserDisplayTopologyChanged, 0) != 0)
+        UserNotifyDisplayChange(gpsi->BitCount, 0);
+
     if (InterlockedExchange(&gUserDisplayConfigurationPending, 0) == 0)
         return;
+
+    UserRefreshCloneTargets();
 
     for (iDevNum = 0; (pGraphicsDevice = EngpFindGraphicsDevice(NULL, iDevNum)) != NULL; ++iDevNum)
     {
