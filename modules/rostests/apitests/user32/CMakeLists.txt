@@ -26,6 +26,7 @@ list(APPEND SOURCE
     DisplayTopology.c
     ForegroundLastInput.c
     RemoteDisplayAdapter.c
+    RemoteDisplayFrame.c
     RemoteDisplayModeRemoval.c
     CreateIconFromResourceEx.c
     CoveredWindow.c
