@@ -755,7 +755,7 @@ PopHiberReadPolicy(
     if (*Percent == 0 || *Percent > 100)
         *Percent = POP_HIBER_DEFAULT_PERCENT;
     /* TODO: an explicit hiberfile reserve request on a portable workspace still creates the file */
-    if (!PopHiberAllowedOnThisWorkspace())
+    if (!PopHiberAllowedOnThisWorkspace() || PopIsHibernateDisabled())
         *Enabled = 0;
 }
 

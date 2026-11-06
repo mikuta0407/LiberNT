@@ -352,6 +352,12 @@ PopInitializeSleepSupport(
     VOID
 );
 
+BOOLEAN
+NTAPI
+PopIsHibernateDisabled(
+    VOID
+);
+
 extern BOOLEAN PopAoAc;
 
 VOID

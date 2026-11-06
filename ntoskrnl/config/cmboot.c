@@ -716,6 +716,10 @@ CmpIsPromotedBootDriver(
  * Optional name of the boot file system, for which to insert
  * its corresponding driver.
  *
+ * @param[in]   ExtraBootDriverFlags
+ * Boot driver flags of the current boot, added to the BootDriverFlags
+ * value of the control set.
+ *
  * @param[in,out]   DriverListHead
  * The driver list where to insert the enumerated drivers.
  *
@@ -731,6 +735,7 @@ CmpFindDrivers(
     _In_ HCELL_INDEX ControlSet,
     _In_ SERVICE_LOAD_TYPE LoadType,
     _In_opt_ PCWSTR BootFileSystem,
+    _In_ ULONG ExtraBootDriverFlags,
     _Inout_ PLIST_ENTRY DriverListHead)
 {
     HCELL_INDEX ServicesCell, ControlCell, GroupOrderCell, DriverCell;
@@ -772,6 +777,7 @@ CmpFindDrivers(
 
     if (!CmpQueryDwordValue(Hive, ControlCell, L"BootDriverFlags", &BootDriverFlags))
         BootDriverFlags = 0;
+    BootDriverFlags |= ExtraBootDriverFlags;
 
     /* Get Safe Boot cell */
     if (InitSafeBootMode)

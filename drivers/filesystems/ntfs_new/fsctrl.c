@@ -1659,6 +1659,74 @@ NtfsExtendVolume(
 
 static
 NTSTATUS
+NtfsQueryDependentVolume(
+    _In_ PDEVICE_OBJECT VolumeDeviceObject,
+    _Inout_ PIRP Irp,
+    _In_ PIO_STACK_LOCATION IrpSp)
+{
+    PFileContextBlock FileCB = NtfsGetFileContext(IrpSp->FileObject);
+    PVolumeContextBlock VolCB = (PVolumeContextBlock)VolumeDeviceObject->DeviceExtension;
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE Response = Irp->AssociatedIrp.SystemBuffer;
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_LEV2_ENTRY Entry;
+    ULONG OutputLength = IrpSp->Parameters.FileSystemControl.OutputBufferLength;
+    POBJECT_NAME_INFORMATION Name;
+    IO_STATUS_BLOCK IoStatus;
+    ULONG Length;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Request;
+
+    Irp->IoStatus.Information = 0;
+    if (!FileCB || FileCB->IsVolumeOpen || !VolCB || !VolCB->StorageDevice || !Response)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Request = IoBuildDeviceIoControlRequest(FSCTL_QUERY_DEPENDENT_VOLUME,
+                                            VolCB->StorageDevice,
+                                            Response,
+                                            IrpSp->Parameters.FileSystemControl.InputBufferLength,
+                                            Response,
+                                            OutputLength,
+                                            FALSE,
+                                            &Event,
+                                            &IoStatus);
+    if (!Request)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = IoCallDriver(VolCB->StorageDevice, Request);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Length = (ULONG)IoStatus.Information;
+    if (Response->ResponseLevel == 2 && Response->NumberEntries != 0)
+    {
+        Entry = &Response->Lev2Depends[0];
+        Name = (POBJECT_NAME_INFORMATION)((PUCHAR)Response + Length);
+        if (OutputLength > Length + sizeof(OBJECT_NAME_INFORMATION) &&
+            NT_SUCCESS(ObQueryNameString(VolCB->StorageDevice, Name, OutputLength - Length, &Entry->DependentVolumeNameSize)))
+        {
+            Entry->DependentVolumeNameSize = Name->Name.Length;
+            RtlMoveMemory(Name, Name->Name.Buffer, Entry->DependentVolumeNameSize);
+            Entry->DependentVolumeNameOffset = Length;
+            Length += Entry->DependentVolumeNameSize;
+        }
+        else
+        {
+            Entry->DependentVolumeNameSize = 0;
+        }
+    }
+
+    Irp->IoStatus.Information = Length;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
 NtfsIsVolumeDirty(
     _In_ PDEVICE_OBJECT VolumeDeviceObject,
     _Inout_ PIRP Irp,
@@ -2211,6 +2279,14 @@ NtfsFsdFileSystemControl(_In_ PDEVICE_OBJECT VolumeDeviceObject,
                     case FSCTL_EXTEND_VOLUME:
                         Irp->IoStatus.Status =
                             NtfsExtendVolume(
+                                VolumeDeviceObject,
+                                Irp,
+                                IrpSp);
+                        break;
+
+                    case FSCTL_QUERY_DEPENDENT_VOLUME:
+                        Irp->IoStatus.Status =
+                            NtfsQueryDependentVolume(
                                 VolumeDeviceObject,
                                 Irp,
                                 IrpSp);

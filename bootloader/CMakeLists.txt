@@ -79,7 +79,9 @@ list(APPEND BOOTLIB_SOURCE
     lib/fs.c
     lib/gpt.c
     lib/libsupp.c
-    lib/ntfs.c)
+    lib/ntfs.c
+    lib/vdisk.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/vhdx/vhdx.c)
 
 if(ARCH STREQUAL "ppc")
     add_asm_files(bootlib_asm ofw/ofwgate.S)
@@ -114,6 +116,7 @@ elseif(ARCH STREQUAL "amd64" OR ARCH STREQUAL "i386")
 endif()
 
 add_library(bootlib ${BOOTLIB_SOURCE})
+target_include_directories(bootlib PRIVATE ${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/vhdx)
 target_link_libraries(bootlib fatfs)
 if(ARCH STREQUAL "amd64" OR ARCH STREQUAL "i386")
     target_link_libraries(bootlib cportlib)

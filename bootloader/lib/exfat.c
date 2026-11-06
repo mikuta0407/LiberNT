@@ -121,18 +121,13 @@ ExFatIsExFat(VOID)
     return ExFatVolume && ExFatVolume->FileSystem.fs_type == FS_EXFAT;
 }
 
-PVOID
-ExFatReadFile(
+static
+BOOLEAN
+ExFatBuildPath(
     _In_ PCSTR Path,
-    _Out_ PULONG Size)
+    _Out_writes_z_(EXFAT_PATH_CHARS) PCHAR FatPath)
 {
-    CHAR FatPath[EXFAT_PATH_CHARS];
-    PVOID Data;
-    FIL File;
-    UINT Read;
     ULONG i;
-
-    *Size = 0;
 
     while (*Path == '\\' || *Path == '/')
         Path++;
@@ -142,13 +137,28 @@ ExFatReadFile(
     FatPath[2] = '/';
     for (i = 0; Path[i] != ANSI_NULL; i++)
     {
-        if (i + 4 >= sizeof(FatPath))
-            return NULL;
+        if (i + 4 >= EXFAT_PATH_CHARS)
+            return FALSE;
         FatPath[i + 3] = (Path[i] == '\\') ? '/' : Path[i];
     }
     FatPath[i + 3] = ANSI_NULL;
 
-    if (!ExFatVolume || f_open(&File, FatPath, FA_READ) != FR_OK)
+    return TRUE;
+}
+
+PVOID
+ExFatReadFile(
+    _In_ PCSTR Path,
+    _Out_ PULONG Size)
+{
+    CHAR FatPath[EXFAT_PATH_CHARS];
+    PVOID Data;
+    FIL File;
+    UINT Read;
+
+    *Size = 0;
+
+    if (!ExFatBuildPath(Path, FatPath) || !ExFatVolume || f_open(&File, FatPath, FA_READ) != FR_OK)
         return NULL;
 
     Data = (f_size(&File) <= MAXULONG) ? FwAllocatePages((SIZE_T)f_size(&File)) : NULL;
@@ -163,6 +173,16 @@ ExFatReadFile(
 
     f_close(&File);
     return Data;
+}
+
+BOOLEAN
+ExFatPathExists(
+    _In_ PCSTR Path)
+{
+    CHAR FatPath[EXFAT_PATH_CHARS];
+    FILINFO Information;
+
+    return ExFatBuildPath(Path, FatPath) && ExFatVolume && f_stat(FatPath, &Information) == FR_OK;
 }
 
 DSTATUS

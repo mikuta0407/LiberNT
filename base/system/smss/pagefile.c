@@ -9,6 +9,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "smss.h"
+#include <winioctl.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -716,6 +717,92 @@ RecoverCorruptPageFile:
     return Status;
 }
 
+static
+BOOLEAN
+SmpIsVolumeDevice(
+    _In_ WCHAR DriveLetter,
+    _In_ PCUNICODE_STRING Device)
+{
+    WCHAR LinkBuffer[] = L"\\??\\?:", TargetBuffer[MAX_PATH];
+    UNICODE_STRING LinkName, Target;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Link;
+    NTSTATUS Status;
+
+    LinkBuffer[STANDARD_DRIVE_LETTER_OFFSET] = DriveLetter;
+    RtlInitUnicodeString(&LinkName, LinkBuffer);
+    InitializeObjectAttributes(&ObjectAttributes, &LinkName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenSymbolicLinkObject(&Link, SYMBOLIC_LINK_QUERY, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    RtlInitEmptyUnicodeString(&Target, TargetBuffer, sizeof(TargetBuffer));
+    Status = NtQuerySymbolicLinkObject(Link, &Target, NULL);
+    NtClose(Link);
+    return NT_SUCCESS(Status) && RtlEqualUnicodeString(&Target, Device, TRUE);
+}
+
+static
+WCHAR
+SmpGetPagingFileDrive(VOID)
+{
+    STORAGE_QUERY_DEPENDENT_VOLUME_REQUEST Request = {2, QUERY_DEPENDENT_VOLUME_REQUEST_FLAG_HOST_VOLUMES};
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_LEV2_ENTRY Entry;
+    PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE Response;
+    WCHAR RootBuffer[] = L"\\??\\?:\\";
+    UCHAR Buffer[1024];
+    UNICODE_STRING Root, Host;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    PSMP_VOLUME_DESCRIPTOR Volume;
+    PLIST_ENTRY NextEntry;
+    WCHAR Drive = RtlUpcaseUnicodeChar(SharedUserData->NtSystemRoot[0]);
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    RootBuffer[STANDARD_DRIVE_LETTER_OFFSET] = Drive;
+    RtlInitUnicodeString(&Root, RootBuffer);
+    InitializeObjectAttributes(&ObjectAttributes, &Root, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Handle,
+                        SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+        return Drive;
+
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock, FSCTL_QUERY_DEPENDENT_VOLUME,
+                             &Request, sizeof(Request), Buffer, sizeof(Buffer));
+    NtClose(Handle);
+
+    Response = (PSTORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE)Buffer;
+    Entry = &Response->Lev2Depends[0];
+    if (!NT_SUCCESS(Status) ||
+        Response->ResponseLevel != 2 ||
+        Response->NumberEntries == 0 ||
+        Entry->HostVolumeNameSize == 0 ||
+        Entry->HostVolumeNameOffset > IoStatusBlock.Information ||
+        Entry->HostVolumeNameSize > IoStatusBlock.Information - Entry->HostVolumeNameOffset)
+    {
+        return Drive;
+    }
+
+    Host.Buffer = (PWCHAR)(Buffer + Entry->HostVolumeNameOffset);
+    Host.Length = Host.MaximumLength = (USHORT)Entry->HostVolumeNameSize;
+
+    for (NextEntry = SmpVolumeDescriptorList.Flink;
+         NextEntry != &SmpVolumeDescriptorList;
+         NextEntry = NextEntry->Flink)
+    {
+        Volume = CONTAINING_RECORD(NextEntry, SMP_VOLUME_DESCRIPTOR, Entry);
+        if (!(Volume->Flags & SMP_VOLUME_PAGEFILE_UNAVAILABLE) && SmpIsVolumeDevice(Volume->DriveLetter, &Host))
+            return Volume->DriveLetter;
+    }
+
+    return Drive;
+}
+
 NTSTATUS
 NTAPI
 SmpCreatePagingFileOnSystemDrive(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor,
@@ -725,9 +812,15 @@ SmpCreatePagingFileOnSystemDrive(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor,
     NTSTATUS Status;
     ASSERT(Descriptor->Name.Buffer[STANDARD_DRIVE_LETTER_OFFSET] == L'?');
 
-    /* Automatic and emergency pagefiles stay on the ReactOS volume. */
-    Descriptor->Name.Buffer[STANDARD_DRIVE_LETTER_OFFSET] = RtlUpcaseUnicodeChar(SharedUserData->NtSystemRoot[0]);
+    /* A system started from a virtual disk keeps its paging file on the host volume, as Windows does. */
+    Descriptor->Name.Buffer[STANDARD_DRIVE_LETTER_OFFSET] = SmpGetPagingFileDrive();
     Status = SmpCreatePagingFileOnFixedDrive(Descriptor, FuzzFactor, MinimumSize);
+    if (!NT_SUCCESS(Status) &&
+        Descriptor->Name.Buffer[STANDARD_DRIVE_LETTER_OFFSET] != RtlUpcaseUnicodeChar(SharedUserData->NtSystemRoot[0]))
+    {
+        Descriptor->Name.Buffer[STANDARD_DRIVE_LETTER_OFFSET] = RtlUpcaseUnicodeChar(SharedUserData->NtSystemRoot[0]);
+        Status = SmpCreatePagingFileOnFixedDrive(Descriptor, FuzzFactor, MinimumSize);
+    }
     if (!NT_SUCCESS(Status))
         Descriptor->Name.Buffer[STANDARD_DRIVE_LETTER_OFFSET] = L'?';
 

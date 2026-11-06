@@ -75,6 +75,8 @@
 
 #define NTFS_MFT_MASK 0x0000FFFFFFFFFFFFULL
 
+#define NTFS_VOLUME_IS_DIRTY 0x0001
+
 #pragma pack(push, 1)
 typedef struct
 {
@@ -277,6 +279,21 @@ NtfsReadFileAt(
     _In_ ULONGLONG Offset,
     _Out_writes_bytes_(Length) PVOID Buffer,
     _In_ ULONG Length);
+
+BOOLEAN
+NtfsPathExists(
+    _In_ PNTFS_VOLUME_INFO Volume,
+    _In_ PCSTR Path);
+
+BOOLEAN
+NtfsHasDataStream(
+    _In_ PNTFS_VOLUME_INFO Volume,
+    _In_ PCSTR Path,
+    _In_ PCWSTR Stream);
+
+BOOLEAN
+NtfsVolumeIsDirty(
+    _In_ PNTFS_VOLUME_INFO Volume);
 
 VOID
 NtfsCloseFile(

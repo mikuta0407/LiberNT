@@ -7,9 +7,12 @@
 
 #pragma once
 
+typedef struct _DK_VIRTUAL_DISK *PDK_VIRTUAL_DISK;
+
 typedef struct _DK_DEVICE
 {
     PVOID Firmware;
+    PDK_VIRTUAL_DISK Virtual;
     PUCHAR Memory;
     ULONGLONG Offset;
     ULONGLONG Length;
@@ -78,6 +81,68 @@ FsCloseFile(
     _In_ PVOID File);
 
 BOOLEAN
+GptGetPartition(
+    _In_ PDK_DEVICE Disk,
+    _In_ ULONG Number,
+    _Out_ PDK_DEVICE Partition);
+
+BOOLEAN
+DkGetPartition(
+    _In_ PDK_DEVICE Disk,
+    _In_ ULONG Number,
+    _Out_ PDK_DEVICE Partition);
+
+BOOLEAN
+DkLocatePartition(
+    _In_ PDK_DEVICE Disk,
+    _In_ PCWSTR Path,
+    _Out_ PDK_DEVICE Partition);
+
+BOOLEAN
+DkOpenVirtualDisk(
+    _In_ PBCD_DEVICE BcdDevice,
+    _Out_ PDK_DEVICE Device);
+
+VOID
+VdGetDisk(
+    _In_ PDK_DEVICE Partition,
+    _Out_ PDK_DEVICE Disk);
+
+BOOLEAN
+VdAppendBootOption(
+    _In_ PDK_DEVICE Partition,
+    _Inout_updates_z_(Size) PSTR Options,
+    _In_ SIZE_T Size);
+
+BOOLEAN
+VdReadBlocks(
+    _In_ PDK_VIRTUAL_DISK Virtual,
+    _In_ ULONGLONG Block,
+    _In_ ULONG Count,
+    _Out_ PVOID Buffer);
+
+BOOLEAN
+FsPathExists(
+    _In_ PDK_DEVICE Device,
+    _In_ PCWSTR Path);
+
+BOOLEAN
+FsHasDataStream(
+    _In_ PDK_DEVICE Device,
+    _In_ PCWSTR Path,
+    _In_ PCWSTR Stream);
+
+BOOLEAN
+FsVolumeIsDirty(
+    _In_ PDK_DEVICE Device);
+
+PVOID
+FsOpenFile(
+    _In_ PDK_DEVICE Device,
+    _In_ PCWSTR Path,
+    _Out_ PULONGLONG Size);
+
+BOOLEAN
 GptGetDiskId(
     _In_ PDK_DEVICE Disk,
     _Out_writes_bytes_(16) PUCHAR DiskId);
@@ -103,3 +168,7 @@ PVOID
 ExFatReadFile(
     _In_ PCSTR Path,
     _Out_ PULONG Size);
+
+BOOLEAN
+ExFatPathExists(
+    _In_ PCSTR Path);
