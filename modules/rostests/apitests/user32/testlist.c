@@ -115,6 +115,7 @@ extern void func_WindowDisplayAffinity(void);
 extern void func_WindowRegionFrame(void);
 extern void func_ShellWindowQueries(void);
 extern void func_ShowWindow(void);
+extern void func_SwitchDesktopActivate(void);
 extern void func_SwitchToThisWindow(void);
 extern void func_SystemParametersInfo(void);
 extern void func_TopmostBand(void);
@@ -246,6 +247,7 @@ const struct test winetest_testlist[] =
     { "WindowRegionFrame", func_WindowRegionFrame },
     { "ShellWindowQueries", func_ShellWindowQueries },
     { "ShowWindow", func_ShowWindow },
+    { "SwitchDesktopActivate", func_SwitchDesktopActivate },
     { "SwitchToThisWindow", func_SwitchToThisWindow },
     { "SystemMenu", func_SystemMenu },
     { "SystemParametersInfo", func_SystemParametersInfo },
