@@ -274,4 +274,38 @@ BOOL
 PDEVOBJ_bRefreshGraphicsDeviceModes(
     _Inout_ PGRAPHICS_DEVICE pGraphicsDevice);
 
+PPDEVOBJ
+PDEVOBJ_CreateCloneTarget(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice);
+
+NTSTATUS
+MultiInitialize(VOID);
+
+BOOL
+MultiCloneAttach(
+    _Inout_ PPDEVOBJ ppdevSource,
+    _Inout_ PPDEVOBJ ppdevTarget);
+
+PPDEVOBJ
+MultiCloneDetach(
+    _In_opt_ PGRAPHICS_DEVICE pGraphicsDevice);
+
+BOOL
+MultiCloneIsTarget(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice);
+
+ULONG
+MultiCloneGetTargets(
+    _In_ PPDEVOBJ ppdevSource,
+    _Out_writes_(cMax) PGRAPHICS_DEVICE *apGraphicsDevice,
+    _In_ ULONG cMax);
+
+VOID
+MultiCloneSuspend(
+    _Inout_ PPDEVOBJ ppdev);
+
+VOID
+MultiCloneResume(
+    _Inout_ PPDEVOBJ ppdev);
+
 #endif /* !__WIN32K_PDEVOBJ_H */

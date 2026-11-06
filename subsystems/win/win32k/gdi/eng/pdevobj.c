@@ -33,7 +33,7 @@ InitPDEVImpl(VOID)
 {
     ghsemPDEV = EngCreateSemaphore();
     if (!ghsemPDEV) return STATUS_INSUFFICIENT_RESOURCES;
-    return STATUS_SUCCESS;
+    return MultiInitialize();
 }
 
 #if DBG
@@ -712,6 +712,35 @@ PDEVOBJ_Create(
     return ppdev;
 }
 
+PPDEVOBJ
+PDEVOBJ_CreateCloneTarget(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice)
+{
+    DEVMODEW dmDefault;
+    PDEVMODEW pdm;
+    PPDEVOBJ ppdev = NULL;
+    DWORD dwAttached;
+
+    EngAcquireSemaphore(ghsemPDEV);
+
+    PDEVOBJ_bRefreshGraphicsDeviceModes(pGraphicsDevice);
+    RtlZeroMemory(&dmDefault, sizeof(dmDefault));
+    dmDefault.dmSize = sizeof(dmDefault);
+    dwAttached = pGraphicsDevice->StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP;
+    if (LDEVOBJ_bProbeAndCaptureDevmode(pGraphicsDevice, &dmDefault, &pdm, TRUE))
+    {
+        ppdev = PDEVOBJ_Create(pGraphicsDevice,
+                               pdm,
+                               EngpGetDisplayDriverAccelerationLevel(pGraphicsDevice),
+                               LDEV_DEVICE_DISPLAY);
+        ExFreePoolWithTag(pdm, GDITAG_DEVMODE);
+    }
+    pGraphicsDevice->StateFlags = (pGraphicsDevice->StateFlags & ~DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) | dwAttached;
+
+    EngReleaseSemaphore(ghsemPDEV);
+    return ppdev;
+}
+
 FORCEINLINE
 VOID
 SwitchPointer(
@@ -849,12 +878,15 @@ PDEVOBJ_bSwitchMode(
     PDEVOBJ_vSuspendDirectDraw(ppdevTmp);
 
     /* 5. Switch the PDEVs */
+    MultiCloneSuspend(ppdev);
     if (!PDEVOBJ_bDynamicModeChange(ppdev, ppdevTmp))
     {
         DPRINT1("PDEVOBJ_bDynamicModeChange() failed\n");
+        MultiCloneResume(ppdev);
         PDEVOBJ_vRelease(ppdevTmp);
         goto leave2;
     }
+    MultiCloneResume(ppdev);
 
     /* 6. Resume DirectDraw */
     PDEVOBJ_vResumeDirectDraw(ppdev);

@@ -290,6 +290,7 @@ DisplayConfigCollectPaths(
         Device.cb = sizeof(Device);
         if (!EnumDisplayDevicesW(NULL, Index, &Device, 0))
             break;
+        /* TODO: report the paths of the clone targets of a source */
         if (!(Device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) ||
             (Device.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER))
             continue;

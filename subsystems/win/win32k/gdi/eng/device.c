@@ -278,6 +278,11 @@ EngpGraphicsDeviceNotification(
     UserEnterExclusive();
     EngAcquireSemaphore(ghsemGraphicsDeviceList);
     pGraphicsDevice = pNotify->pGraphicsDevice;
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+    if (pGraphicsDevice)
+        UserDetachCloneTarget(pGraphicsDevice);
+    EngAcquireSemaphore(ghsemGraphicsDeviceList);
+    pGraphicsDevice = pNotify->pGraphicsDevice;
     if (pGraphicsDevice && gppdevDetached && gpmdev && gpmdev->ppdevGlobal->pGraphicsDevice == pGraphicsDevice)
     {
         TRACE("Moving the desktop off the removed graphics device %S\n", pGraphicsDevice->szWinDeviceName);
