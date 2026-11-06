@@ -19,6 +19,7 @@ list(APPEND SOURCE
     CreateDialog.c
     DisplayChangeBroadcast.c
     DisplayChangeDesktops.c
+    DisplayChangeMaximized.c
     DisplayDeviceAttach.c
     DisplayDeviceRemoval.c
     DisplayTopology.c
