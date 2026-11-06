@@ -21,6 +21,8 @@ DBG_DEFAULT_CHANNEL(UserWinsta);
 
 /* Winlogon SAS window */
 HWND hwndSAS = NULL;
+ULONG gulRemoteSessionId = MAXULONG;
+BOOLEAN gbConsoleInputHeld = FALSE;
 
 /* Full path to WindowStations directory */
 
@@ -125,6 +127,25 @@ IntNotifySessionChange(ULONG Event, ULONG SessionId)
         return FALSE;
     }
 
+    switch (Event)
+    {
+        case WTS_CONSOLE_CONNECT:
+            gulRemoteSessionId = MAXULONG;
+            RtlSetActiveConsoleId(SessionId);
+            break;
+        case WTS_CONSOLE_DISCONNECT:
+            if (RtlGetActiveConsoleId() == SessionId)
+                RtlSetActiveConsoleId(MAXULONG);
+            break;
+        case WTS_REMOTE_CONNECT:
+            gulRemoteSessionId = SessionId;
+            gbConsoleInputHeld = TRUE;
+            break;
+        case WTS_REMOTE_DISCONNECT:
+            gbConsoleInputHeld = FALSE;
+            break;
+    }
+
     for (Entry = SessionNotificationList.Flink; Entry != &SessionNotificationList; Entry = Entry->Flink)
     {
         PSESSION_NOTIFICATION Notification = CONTAINING_RECORD(Entry, SESSION_NOTIFICATION, Entry);
@@ -133,7 +154,7 @@ IntNotifySessionChange(ULONG Event, ULONG SessionId)
         if ((Window->state & WNDS_DESTROYED) || (Window->head.pti->TIF_flags & TIF_INCLEANUP))
             continue;
         if (Notification->Flags || PsGetProcessSessionId(Window->head.pti->ppi->peProcess) == SessionId)
-            UserPostMessage(UserHMGetHandle(Window), WM_WTSSESSION_CHANGE, Event, SessionId);
+            UserSendNotifyMessage(UserHMGetHandle(Window), WM_WTSSESSION_CHANGE, Event, SessionId);
     }
     return TRUE;
 }
@@ -2086,6 +2107,150 @@ CopyUserNameList(
 }
 
 static NTSTATUS FASTCALL
+IntQueryWindowStationDirectory(
+    _In_ HANDLE DirectoryHandle,
+    _Out_ PVOID *DirectoryBuffer)
+{
+    NTSTATUS Status;
+    PVOID Buffer;
+    ULONG Context, QueryLength, BufferSize = PAGE_SIZE;
+
+    *DirectoryBuffer = NULL;
+    for (;;)
+    {
+        Buffer = ExAllocatePoolWithTag(PagedPool, BufferSize, TAG_WINSTA);
+        if (!Buffer)
+            return STATUS_NO_MEMORY;
+
+        RtlZeroMemory(Buffer, BufferSize);
+        Context = 0;
+        QueryLength = 0;
+        Status = ZwQueryDirectoryObject(DirectoryHandle,
+                                        Buffer,
+                                        BufferSize,
+                                        FALSE,
+                                        TRUE,
+                                        &Context,
+                                        &QueryLength);
+        if (Status == STATUS_NO_MORE_ENTRIES)
+            Status = STATUS_SUCCESS;
+        if (NT_SUCCESS(Status) &&
+            Status != STATUS_MORE_ENTRIES &&
+            Status != STATUS_BUFFER_TOO_SMALL &&
+            Status != STATUS_BUFFER_OVERFLOW)
+        {
+            *DirectoryBuffer = Buffer;
+            return STATUS_SUCCESS;
+        }
+
+        ExFreePoolWithTag(Buffer, TAG_WINSTA);
+        if (Status != STATUS_MORE_ENTRIES &&
+            Status != STATUS_BUFFER_TOO_SMALL &&
+            Status != STATUS_BUFFER_OVERFLOW)
+        {
+            return Status;
+        }
+        if (BufferSize > MAXULONG / 2)
+            return STATUS_INTEGER_OVERFLOW;
+        BufferSize *= 2;
+    }
+}
+
+VOID FASTCALL
+UserForEachSessionDesktop(
+    _In_ PUSER_SESSION Session,
+    _In_ VOID (FASTCALL *Callback)(PDESKTOP Desktop))
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    POBJECT_DIRECTORY_INFORMATION DirEntry;
+    PWINSTATION_OBJECT WindowStation;
+    PLIST_ENTRY DesktopEntry;
+    PDESKTOP *Desktops;
+    HANDLE DirectoryHandle, WindowStationHandle;
+    PVOID Buffer;
+    NTSTATUS Status;
+    ULONG Count, Index;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &Session->WinStaDirName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+    Status = ZwOpenDirectoryObject(&DirectoryHandle, DIRECTORY_QUERY, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("Cannot open %wZ: 0x%08lx\n", &Session->WinStaDirName, Status);
+        return;
+    }
+
+    Status = IntQueryWindowStationDirectory(DirectoryHandle, &Buffer);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("Cannot list %wZ: 0x%08lx\n", &Session->WinStaDirName, Status);
+        ZwClose(DirectoryHandle);
+        return;
+    }
+
+    for (DirEntry = Buffer; DirEntry->Name.Length; ++DirEntry)
+    {
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &DirEntry->Name,
+                                   OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                                   DirectoryHandle,
+                                   NULL);
+        Status = ObOpenObjectByName(&ObjectAttributes,
+                                    ExWindowStationObjectType,
+                                    KernelMode,
+                                    NULL,
+                                    0,
+                                    NULL,
+                                    &WindowStationHandle);
+        if (!NT_SUCCESS(Status))
+            continue;
+        Status = ObReferenceObjectByHandle(WindowStationHandle,
+                                           0,
+                                           ExWindowStationObjectType,
+                                           KernelMode,
+                                           (PVOID*)&WindowStation,
+                                           NULL);
+        ObCloseHandle(WindowStationHandle, KernelMode);
+        if (!NT_SUCCESS(Status))
+            continue;
+
+        Count = 0;
+        for (DesktopEntry = WindowStation->DesktopListHead.Flink;
+             DesktopEntry != &WindowStation->DesktopListHead;
+             DesktopEntry = DesktopEntry->Flink)
+        {
+            Count++;
+        }
+        Desktops = Count ? ExAllocatePoolWithTag(PagedPool, Count * sizeof(PDESKTOP), TAG_WINSTA) : NULL;
+        if (Desktops)
+        {
+            Count = 0;
+            for (DesktopEntry = WindowStation->DesktopListHead.Flink;
+                 DesktopEntry != &WindowStation->DesktopListHead;
+                 DesktopEntry = DesktopEntry->Flink)
+            {
+                Desktops[Count] = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+                ObReferenceObject(Desktops[Count]);
+                Count++;
+            }
+            for (Index = 0; Index < Count; Index++)
+            {
+                Callback(Desktops[Index]);
+                ObDereferenceObject(Desktops[Index]);
+            }
+            ExFreePoolWithTag(Desktops, TAG_WINSTA);
+        }
+        ObDereferenceObject(WindowStation);
+    }
+
+    ExFreePoolWithTag(Buffer, TAG_WINSTA);
+    ZwClose(DirectoryHandle);
+}
+
+static NTSTATUS FASTCALL
 BuildWindowStationNameList(
     ULONG dwSize,
     PUSER_NAME_LIST lpBuffer,
@@ -2095,7 +2260,6 @@ BuildWindowStationNameList(
     NTSTATUS Status;
     HANDLE DirectoryHandle;
     PVOID Buffer = NULL;
-    ULONG Context, QueryLength, BufferSize = PAGE_SIZE;
     ULONG ReturnLength, EntryCount, NameBytes;
     POBJECT_DIRECTORY_INFORMATION DirEntry;
     PUSER_NAME_LIST NameList = NULL;
@@ -2117,48 +2281,9 @@ BuildWindowStationNameList(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    for (;;)
-    {
-        Buffer = ExAllocatePoolWithTag(PagedPool, BufferSize, TAG_WINSTA);
-        if (!Buffer)
-        {
-            Status = STATUS_NO_MEMORY;
-            goto Quit;
-        }
-
-        RtlZeroMemory(Buffer, BufferSize);
-        Context = 0;
-        QueryLength = 0;
-        Status = ZwQueryDirectoryObject(DirectoryHandle,
-                                        Buffer,
-                                        BufferSize,
-                                        FALSE,
-                                        TRUE,
-                                        &Context,
-                                        &QueryLength);
-        if (Status == STATUS_NO_MORE_ENTRIES)
-        {
-            Status = STATUS_SUCCESS;
-            break;
-        }
-        if (Status != STATUS_MORE_ENTRIES &&
-            Status != STATUS_BUFFER_TOO_SMALL &&
-            Status != STATUS_BUFFER_OVERFLOW)
-        {
-            if (NT_SUCCESS(Status))
-                break;
-            goto Quit;
-        }
-
-        ExFreePoolWithTag(Buffer, TAG_WINSTA);
-        Buffer = NULL;
-        if (BufferSize > MAXULONG / 2)
-        {
-            Status = STATUS_INTEGER_OVERFLOW;
-            goto Quit;
-        }
-        BufferSize *= 2;
-    }
+    Status = IntQueryWindowStationDirectory(DirectoryHandle, &Buffer);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
 
     ReturnLength = USER_NAME_LIST_HEADER_SIZE;
     EntryCount = 0;

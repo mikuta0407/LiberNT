@@ -329,8 +329,9 @@ IopGetDeviceObjectFromDeviceInstance(PUNICODE_STRING DeviceInstance)
     Node = IopRootDeviceNode;
     while (Node)
     {
-        if (DeviceInstance == NULL || DeviceInstance->Length == 0 ||
-            RtlEqualUnicodeString(&Node->InstancePath, DeviceInstance, TRUE))
+        if ((DeviceInstance == NULL || DeviceInstance->Length == 0 ||
+             RtlEqualUnicodeString(&Node->InstancePath, DeviceInstance, TRUE)) &&
+            !((Node->Flags & DNF_DEVICE_GONE) && Node->State == DeviceNodeRemoved))
         {
             DeviceObject = Node->PhysicalDeviceObject;
             if (DeviceObject && !ObReferenceObjectSafe(DeviceObject))

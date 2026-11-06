@@ -1503,6 +1503,7 @@ struct _DXGKRNL_ADAPTER
     UNICODE_STRING              DisplayAdapterInterfaceName;
     BOOLEAN                     DisplayAdapterInterfaceEnabled;
     WCHAR                       DisplayDeviceName[24];
+    struct _DXGKP_DISPLAY_BRIDGE *DisplayBridge;
 
     /* ACPI and power-state event subscriptions (acpievent.c). */
     DXGKP_ACPI_EVENTS           AcpiEvents;
@@ -3821,6 +3822,13 @@ BOOLEAN
 DxgkIsDisplayAdapter(
     _In_ PDXGKRNL_ADAPTER Adapter);
 
+BOOLEAN
+DxgkIsDisplayBridgeDevice(
+    _In_opt_ PDEVICE_OBJECT DeviceObject);
+
+VOID
+DxgkDisplayInitialize(VOID);
+
 NTSTATUS
 DxgkCreateRedirectionSurface(
     _In_ PDXGKRNL_ADAPTER Adapter,
@@ -3990,6 +3998,15 @@ VOID
 DxgkDisplayUnregister(
     _In_ PDXGKRNL_ADAPTER Adapter);
 
+BOOLEAN
+DxgkDisplayBeginRemove(
+    _In_ PDXGKRNL_ADAPTER Adapter);
+
+VOID
+DxgkDisplaySetRemovePending(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ BOOLEAN RemovePending);
+
 /*
  * Display dispatch helpers — called from dxgkrnl dispatch routines
  * to route IRPs targeting \Device\Video0 to the display handler.
@@ -3998,22 +4015,26 @@ DxgkDisplayUnregister(
 BOOLEAN
 DxgkDisplayDispatchIoctl(
     _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP           Irp);
+    _In_ PIRP           Irp,
+    _Out_ PNTSTATUS     Status);
 
 BOOLEAN
 DxgkDisplayDispatchCreate(
     _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP           Irp);
+    _In_ PIRP           Irp,
+    _Out_ PNTSTATUS     Status);
 
 BOOLEAN
 DxgkDisplayDispatchClose(
     _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP           Irp);
+    _In_ PIRP           Irp,
+    _Out_ PNTSTATUS     Status);
 
 BOOLEAN
 DxgkDisplayDispatchPnp(
     _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP           Irp);
+    _In_ PIRP           Irp,
+    _Out_ PNTSTATUS     Status);
 
 NTSTATUS
 DxgkDisplayCommitVidPn(

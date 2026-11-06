@@ -119,7 +119,7 @@ PiReferencePnpNotifyEntry(
  */
 static
 CODE_SEG("PAGE")
-VOID
+NTSTATUS
 PiCallNotifyProc(
     _In_ PDRIVER_NOTIFICATION_CALLBACK_ROUTINE Proc,
     _In_ PVOID NotificationStructure,
@@ -131,16 +131,17 @@ PiCallNotifyProc(
     ULONG oldApcDisable = KeGetCurrentThread()->CombinedApcDisable;
 #endif
 
-    Proc(NotificationStructure, Context);
+    NTSTATUS Status = Proc(NotificationStructure, Context);
 
     ASSERT(oldIrql == KeGetCurrentIrql() &&
            oldApcDisable == KeGetCurrentThread()->CombinedApcDisable);
+    return Status;
 }
 
 static
 CODE_SEG("PAGE")
 _Requires_lock_held_(Lock)
-VOID
+NTSTATUS
 PiProcessSingleNotification(
     _In_ PPNP_NOTIFY_ENTRY Entry,
     _In_ PVOID NotificationStructure,
@@ -148,13 +149,14 @@ PiProcessSingleNotification(
     _Out_ PLIST_ENTRY *NextEntry)
 {
     PNP_NOTIFY_ACTIVE_CALLBACK ActiveCallback;
+    NTSTATUS Status;
 
     PAGED_CODE();
 
     if (Entry->Deleted)
     {
         *NextEntry = Entry->PnpNotifyList.Flink;
-        return;
+        return STATUS_SUCCESS;
     }
 
     // the notification may be unregistered inside the procedure
@@ -166,7 +168,7 @@ PiProcessSingleNotification(
     // release the lock because the notification routine has to be called without any
     // limitations regarding APCs
     KeReleaseGuardedMutex(Lock);
-    PiCallNotifyProc(Entry->PnpNotificationProc, NotificationStructure, Entry->Context);
+    Status = PiCallNotifyProc(Entry->PnpNotificationProc, NotificationStructure, Entry->Context);
     KeAcquireGuardedMutex(Lock);
 
     // take the next entry link only after the callback finishes
@@ -174,6 +176,7 @@ PiProcessSingleNotification(
     RemoveEntryList(&ActiveCallback.ListEntry);
     *NextEntry = Entry->PnpNotifyList.Flink;
     PiDereferencePnpNotifyEntry(Entry);
+    return Status;
 }
 
 /**
@@ -282,7 +285,7 @@ PiNotifyHardwareProfileChange(
  * @param[in]  CustomNotification  Pointer to a custom notification for GUID_PNP_CUSTOM_NOTIFICATION
  */
 CODE_SEG("PAGE")
-VOID
+NTSTATUS
 PiNotifyTargetDeviceChange(
     _In_ LPCGUID Event,
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -291,6 +294,8 @@ PiNotifyTargetDeviceChange(
     PAGED_CODE();
 
     PVOID notificationStruct;
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN CanVeto = IsEqualGUID(Event, &GUID_TARGET_DEVICE_QUERY_REMOVE);
     // just in case our device is removed during the operation
     ObReferenceObject(DeviceObject);
 
@@ -303,7 +308,8 @@ PiNotifyTargetDeviceChange(
         notifStruct = ExAllocatePoolWithTag(PagedPool, sizeof(*notifStruct), TAG_PNP_NOTIFY);
         if (!notifStruct)
         {
-            return;
+            ObDereferenceObject(DeviceObject);
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         *notifStruct = (TARGET_DEVICE_REMOVAL_NOTIFICATION) {
@@ -339,13 +345,17 @@ PiNotifyTargetDeviceChange(
         C_ASSERT(FIELD_OFFSET(TARGET_DEVICE_REMOVAL_NOTIFICATION, FileObject)
                  == FIELD_OFFSET(TARGET_DEVICE_CUSTOM_NOTIFICATION, FileObject));
 
-        PiProcessSingleNotification(nEntry, notificationStruct, &PiNotifyTargetDeviceLock, &entry);
+        Status = PiProcessSingleNotification(nEntry, notificationStruct, &PiNotifyTargetDeviceLock, &entry);
+        if (CanVeto && !NT_SUCCESS(Status))
+            break;
+        Status = STATUS_SUCCESS;
     }
 
     KeReleaseGuardedMutex(&PiNotifyTargetDeviceLock);
     if (notificationStruct != CustomNotification)
         ExFreePoolWithTag(notificationStruct, TAG_PNP_NOTIFY);
     ObDereferenceObject(DeviceObject);
+    return Status;
 }
 
 /* PUBLIC FUNCTIONS **********************************************************/
