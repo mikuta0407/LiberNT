@@ -37,6 +37,7 @@ list(APPEND SOURCE
     EnumDisplaySettings.c
     ForegroundRetake.c
     ForegroundRight.c
+    ForegroundStartRight.c
     ForegroundStartup.c
     GetClassInfo.c
     GetDCEx.c
