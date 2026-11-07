@@ -1489,7 +1489,7 @@ WinPosBatchAddOwnerGroup(PWINPOS_BATCH Batch, HWND *List, PWND Window, PWND Skip
       for (i = 0; List[i]; i++)
       {
          Child = ValidateHwndNoErr(List[i]);
-         if (!Child || Child == Skip || Child == Window || Child->spwndOwner != Window || IS_WND_IMELIKE(Child))
+         if (!Child || Child == Skip || Child == Window || Child->spwndOwner != Window)
             continue;
          if (bSkipTopmost && (Child->ExStyle & WS_EX_TOPMOST))
             continue;
@@ -1510,7 +1510,7 @@ WinPosBatchAddOwnedGroups(PWINPOS_BATCH Batch, HWND *List, PWND Owner, PWND Skip
    for (i = 0; List[i]; i++)
    {
       Child = ValidateHwndNoErr(List[i]);
-      if (!Child || Child == Skip || Child == Owner || Child->spwndOwner != Owner || IS_WND_IMELIKE(Child))
+      if (!Child || Child == Skip || Child == Owner || Child->spwndOwner != Owner)
          continue;
       WinPosBatchAddOwnerGroup(Batch, List, Child, NULL, FALSE, 1);
    }
