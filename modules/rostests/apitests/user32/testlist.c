@@ -68,6 +68,7 @@ extern void func_GetWindowPlacement(void);
 extern void func_GhostWindow(void);
 extern void func_GW_ENABLEDPOPUP(void);
 extern void func_ImeWindow(void);
+extern void func_ImeWindowZOrder(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_InputMessageSource(void);
 extern void func_InvalidHandles(void);
@@ -208,6 +209,7 @@ const struct test winetest_testlist[] =
     { "GhostWindow", func_GhostWindow },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
     { "ImeWindow", func_ImeWindow },
+    { "ImeWindowZOrder", func_ImeWindowZOrder },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "InputMessageSource", func_InputMessageSource },
     { "InvalidHandles", func_InvalidHandles },
