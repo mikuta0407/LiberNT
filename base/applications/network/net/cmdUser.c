@@ -1254,6 +1254,8 @@ cmdUser(
             result = 1;
             goto done;
         }
+
+        pUserInfo->usri4_password = lpPassword;
     }
     else if (bAdd)
     {

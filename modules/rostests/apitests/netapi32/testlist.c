@@ -9,10 +9,12 @@
 #include <apitest.h>
 
 extern void func_DsRoleGetPrimaryDomainInformation(void);
+extern void func_NetUserSetInfo(void);
 
 const struct test winetest_testlist[] =
 {
     { "DsRoleGetPrimaryDomainInformation", func_DsRoleGetPrimaryDomainInformation },
+    { "NetUserSetInfo", func_NetUserSetInfo },
 
     { 0, 0 }
 };
