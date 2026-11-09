@@ -121,6 +121,7 @@ extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
 extern void func_WaitForInputIdle(void);
 extern void func_WindowBand(void);
+extern void func_WindowPosInsertAfter(void);
 extern void func_CallWindowProc(void);
 extern void func_WndProc(void);
 extern void func_wsprintfApi(void);
@@ -246,6 +247,7 @@ const struct test winetest_testlist[] =
     { "VirtualKey", func_VirtualKey },
     { "WaitForInputIdle", func_WaitForInputIdle },
     { "WindowBand", func_WindowBand },
+    { "WindowPosInsertAfter", func_WindowPosInsertAfter },
     { "CallWindowProc", func_CallWindowProc },
     { "WndProc", func_WndProc },
     { "wsprintfApi", func_wsprintfApi },
