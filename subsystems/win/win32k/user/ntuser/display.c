@@ -1110,12 +1110,14 @@ co_UserProcessDisplayConfigurationUpdate(VOID)
     PPDEVOBJ ppdev;
     ULONG iDevNum, cbReturned;
     LONG lResult;
+    BOOL bEventDevice;
 
     if (InterlockedExchange(&gUserDisplayConfigurationPending, 0) == 0)
         return;
 
     for (iDevNum = 0; (pGraphicsDevice = EngpFindGraphicsDevice(NULL, iDevNum)) != NULL; ++iDevNum)
     {
+        bEventDevice = InterlockedExchange(&pGraphicsDevice->lMonitorEvent, 0) != 0;
         RtlInitUnicodeString(&ustrDevice, pGraphicsDevice->szWinDeviceName);
         ppdev = EngpGetPDEV(&ustrDevice);
         if (ppdev == NULL)
@@ -1134,7 +1136,8 @@ co_UserProcessDisplayConfigurationUpdate(VOID)
             continue;
         }
 
-        if (ModeInfo.VisScreenWidth == ppdev->pdmwDev->dmPelsWidth &&
+        if (!bEventDevice &&
+            ModeInfo.VisScreenWidth == ppdev->pdmwDev->dmPelsWidth &&
             ModeInfo.VisScreenHeight == ppdev->pdmwDev->dmPelsHeight &&
             (ModeInfo.Frequency == 0 || ModeInfo.Frequency == ppdev->pdmwDev->dmDisplayFrequency))
         {
