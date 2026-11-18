@@ -76,6 +76,7 @@ typedef struct _GRAPHICS_DEVICE
     PVIDEO_MONITOR_DEVICE pvMonDev;
     PFILE_OBJECT     FileObject;
     DWORD            ProtocolType;
+    volatile LONG    lMonitorEvent;
 } GRAPHICS_DEVICE, *PGRAPHICS_DEVICE;
 
 typedef struct _PDEVOBJ
@@ -224,6 +225,28 @@ BOOL
 PDEVOBJ_bDisableDisplay(
     _Inout_ PPDEVOBJ ppdev);
 
+BOOL
+NTAPI
+PDEVOBJ_bMoveToDisplay(
+    _Inout_ PPDEVOBJ ppdev,
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice,
+    _In_ PDEVMODEW pdm);
+
+BOOL
+NTAPI
+PDEVOBJ_bReturnToDetachedDisplay(
+    _Inout_ PPDEVOBJ ppdev);
+
+extern PPDEVOBJ gppdevDetached;
+
+PPDEVOBJ
+NTAPI
+EngpGetDetachedPDEV(VOID);
+
+BOOL
+PDEVOBJ_bGraphicsDeviceInUse(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice);
+
 PPDEVOBJ
 PDEVOBJ_Create(
     _In_opt_ PGRAPHICS_DEVICE pGraphicsDevice,
@@ -246,5 +269,9 @@ PDEVOBJ_lChangeDisplaySettings(
     _In_opt_ PMDEVOBJ pmdevOld,
     _Out_ PMDEVOBJ *ppmdevNew,
     _In_ BOOL bSearchClosestMode);
+
+BOOL
+PDEVOBJ_bRefreshGraphicsDeviceModes(
+    _Inout_ PGRAPHICS_DEVICE pGraphicsDevice);
 
 #endif /* !__WIN32K_PDEVOBJ_H */

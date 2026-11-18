@@ -1152,7 +1152,7 @@ SECURITY_STATUS SEC_ENTRY ntlm_QueryContextAttributesA(PCtxtHandle phContext,
 /***********************************************************************
  *              ImpersonateSecurityContext
  */
-static SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phContext)
+SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phContext)
 {
     PNegoHelper helper;
     BOOL ret;
@@ -1176,13 +1176,33 @@ static SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phC
 /***********************************************************************
  *              RevertSecurityContext
  */
-static SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle phContext)
+SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle phContext)
 {
     TRACE("%p\n", phContext);
     if (!phContext)
         return SEC_E_INVALID_HANDLE;
 
     return RevertToSelf() ? SEC_E_OK : SEC_E_NO_IMPERSONATION;
+}
+
+SECURITY_STATUS SEC_ENTRY ntlm_QuerySecurityContextToken(PCtxtHandle phContext, HANDLE *phToken)
+{
+    PNegoHelper helper;
+
+    TRACE("%p %p\n", phContext, phToken);
+    if (!phContext || !phToken)
+        return SEC_E_INVALID_HANDLE;
+
+    helper = (PNegoHelper)phContext->dwLower;
+    if (!helper || helper->mode != NTLM_SERVER || !helper->crypt.ntlm.a4i)
+        return SEC_E_INVALID_HANDLE;
+    if (!helper->token)
+        return SEC_E_NO_IMPERSONATION;
+
+    if (!DuplicateHandle(GetCurrentProcess(), helper->token, GetCurrentProcess(), phToken, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS))
+        return SEC_E_INSUFFICIENT_MEMORY;
+    return SEC_E_OK;
 }
 
 
@@ -1367,6 +1387,7 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
     SecBufferDesc local_desc;
     PSecBuffer     local_buff;
     BYTE          local_sig[16];
+    ULONG         sig_start;
 
     TRACE("%p %p %d %p\n", phContext, pMessage, MessageSeqNo, pfQOP);
     if(!phContext)
@@ -1412,8 +1433,9 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
     if((ret = ntlm_CreateSignature(helper, &local_desc, token_idx, NTLM_RECV, TRUE)) != SEC_E_OK)
         return ret;
 
-    if(memcmp(((PBYTE)local_buff[token_idx].pvBuffer) + 8,
-                ((PBYTE)pMessage->pBuffers[token_idx].pvBuffer) + 8, 8))
+    sig_start = (helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && helper->neg_flags & NTLMSSP_NEGOTIATE_SIGN) ? 4 : 8;
+    if(memcmp(((PBYTE)local_buff[token_idx].pvBuffer) + sig_start,
+                ((PBYTE)pMessage->pBuffers[token_idx].pvBuffer) + sig_start, 16 - sig_start))
         ret = SEC_E_MESSAGE_ALTERED;
     else
         ret = SEC_E_OK;
@@ -1606,7 +1628,7 @@ static const SecurityFunctionTableA ntlmTableA = {
     NULL,   /* ImportSecurityContextA */
     NULL,   /* AddCredentialsA */
     NULL,   /* Reserved8 */
-    NULL,   /* QuerySecurityContextToken */
+    ntlm_QuerySecurityContextToken,     /* QuerySecurityContextToken */
     ntlm_EncryptMessage,                /* EncryptMessage */
     ntlm_DecryptMessage,                /* DecryptMessage */
     NULL,   /* SetContextAttributesA */
@@ -1637,7 +1659,7 @@ static const SecurityFunctionTableW ntlmTableW = {
     NULL,   /* ImportSecurityContextW */
     NULL,   /* AddCredentialsW */
     NULL,   /* Reserved8 */
-    NULL,   /* QuerySecurityContextToken */
+    ntlm_QuerySecurityContextToken,     /* QuerySecurityContextToken */
     ntlm_EncryptMessage,                /* EncryptMessage */
     ntlm_DecryptMessage,                /* DecryptMessage */
     NULL,   /* SetContextAttributesW */

@@ -62,6 +62,7 @@ typedef enum _DWM_GPU_RESULT
 
 BOOL DwmGpuComposeInitialize(LONG Width, LONG Height);
 BOOL DwmGpuComposeResize(LONG Width, LONG Height);
+BOOL DwmGpuComposeOutputMoved(void);
 BOOL DwmGpuComposeIsActive(void);
 
 /* Starts with cached wallpaper. NULL damage requests a full redraw; several
@@ -120,6 +121,7 @@ DWM_GPU_RESULT DwmGpuComposeEnd(void);
 /* Discards an unpresented frame. A stale GDI FRONT import may be retried
  * because a window can disappear between GETFRAME and OpenResource. */
 DWM_GPU_RESULT DwmGpuComposeAbort(void);
+DWM_GPU_RESULT DwmGpuComposeRetry(void);
 
 /* Tests a deferred output without rendering, presenting or rotating buffers. */
 DWM_GPU_RESULT DwmGpuComposeCheckOutput(void);

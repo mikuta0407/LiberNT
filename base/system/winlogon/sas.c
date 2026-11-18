@@ -1602,14 +1602,17 @@ DoGenericAction(
                 if (!HandleLogon(Session))
                 {
                     Session->LogonState = STATE_LOGGED_OFF;
+                    HandleRemoteLogonDone(Session);
                     Session->Gina.Functions.WlxDisplaySASNotice(Session->Gina.Context);
                 }
+                HandleRemoteLogonDone(Session);
             }
             break;
         case WLX_SAS_ACTION_NONE: /* 0x02 */
             if (Session->LogonState == STATE_LOGGED_OFF_SAS)
             {
                 Session->LogonState = STATE_LOGGED_OFF;
+                HandleRemoteLogonDone(Session);
                 Session->Gina.Functions.WlxDisplaySASNotice(Session->Gina.Context);
             }
             else if (Session->LogonState == STATE_LOGGED_ON_SAS)
@@ -1704,10 +1707,11 @@ DoGenericAction(
             if ((Session->LogonState == STATE_LOCKED) ||
                 (Session->LogonState == STATE_LOCKED_SAS))
             {
-                CallNotificationDlls(Session, UnlockHandler);
                 SwitchDesktop(Session->ApplicationDesktop);
+                CallNotificationDlls(Session, UnlockHandler);
                 RemoveStatusMessage(Session);
                 Session->LogonState = STATE_LOGGED_ON;
+                HandleConsoleSignIn(Session);
             }
             break;
         default:
@@ -1801,6 +1805,27 @@ DispatchSAS(
                 default:
                     return;
             }
+            break;
+
+        case WLX_SAS_TYPE_AUTHENTICATED:
+            if (Session->LogonState != STATE_LOGGED_OFF)
+            {
+                HandleRemoteLogonDone(Session);
+                return;
+            }
+            Session->LogonState = STATE_LOGGED_OFF_SAS;
+            CloseAllDialogWindows();
+            Session->Options = 0;
+            wlxAction = (DWORD)Session->Gina.Functions.WlxLoggedOutSAS(Session->Gina.Context,
+                                                                       WLX_SAS_TYPE_AUTHENTICATED,
+                                                                       &Session->LogonId,
+                                                                       LogonSid,
+                                                                       &Session->Options,
+                                                                       &Session->UserToken,
+                                                                       &Session->MprNotifyInfo,
+                                                                       (PVOID*)&Session->Profile);
+            if (wlxAction != WLX_SAS_ACTION_LOGON && wlxAction != WLX_SAS_ACTION_NONE)
+                HandleRemoteLogonDone(Session);
             break;
 
         case WLX_SAS_TYPE_TIMEOUT:
@@ -1993,10 +2018,25 @@ SASWindowProc(
             }
             return TRUE;
         }
+        case WLX_WM_REMOTE_CONSOLE:
+        {
+            return HandleRemoteConsoleMessage(Session, (struct _REMOTE_CONSOLE_MESSAGE *)lParam);
+        }
+        case WLX_WM_REMOTE_LOCKED:
+        {
+            if (Session->LogonState == STATE_LOCKED)
+                Session->Gina.Functions.WlxDisplayLockedNotice(Session->Gina.Context);
+            return TRUE;
+        }
         case WM_LOGONNOTIFY:
         {
             switch(wParam)
             {
+                case LN_CONSOLE_KEY:
+                {
+                    HandleConsoleKey(Session, LOWORD(lParam), HIWORD(lParam));
+                    break;
+                }
                 case LN_MESSAGE_BEEP:
                 {
                     return HandleMessageBeep(Session, lParam);
@@ -2127,6 +2167,10 @@ SASWindowProc(
                 KillTimer(hwndDlg, 1);
                 RestartUserShell(Session);
             }
+            else
+            {
+                HandleConsoleClock(Session);
+            }
             break;
         }
         case WLX_WM_SAS:
@@ -2137,6 +2181,8 @@ SASWindowProc(
         case WL_WM_SETUP_DONE:
         {
             RegisterHotKeys(Session, hwndDlg);
+            if (!StartRemoteConsole(Session))
+                TRACE("WL: No remote console for this session\n");
             SwitchDesktop(Session->WinlogonDesktop);
             PostMessageW(hwndDlg, WLX_WM_SAS, WLX_SAS_TYPE_CTRL_ALT_DEL, 0);
             return TRUE;

@@ -8,6 +8,7 @@ list(APPEND SOURCE
     CalculatePopupWindowPosition.c
     CallWindowProc.c
     CallbackNesting.c
+    ChangeDisplaySettingsReset.c
     CharFuncs.c
     CloseWindow.c
     ClipboardAccess.c
@@ -19,6 +20,17 @@ list(APPEND SOURCE
     CopyImage_Icon.c
     CursorPresentation.c
     CreateDialog.c
+    DisplayChangeBroadcast.c
+    DisplayChangeDesktops.c
+    DisplayChangeMaximized.c
+    DisplayDeviceAttach.c
+    DisplayDeviceRemoval.c
+    DisplayTopology.c
+    ForegroundLastInput.c
+    RemoteDisplayAdapter.c
+    RemoteDisplayModeRemoval.c
+    RemoteDisplayContent.c
+    RemoteDisplayResize.c
     CreateIconFromResourceEx.c
     CoveredWindow.c
     CreateWindowEx.c
@@ -133,6 +145,7 @@ list(APPEND SOURCE
     ShellWindowQueries.c
     ShellWindowZOrder.c
     ShowWindow.c
+    SwitchDesktopActivate.c
     SwitchToThisWindow.c
     SystemMenu.c
     TopmostBand.c
@@ -165,6 +178,7 @@ add_executable(user32_apitest
 target_link_libraries(user32_apitest wine ${PSEH_LIB})
 set_module_type(user32_apitest win32cui)
 add_importlibs(user32_apitest advapi32 imm32 gdi32 gdiplus user32 comctl32 setupapi msvcrt kernel32 ntdll)
+add_importlibs(user32_apitest advapi32 cfgmgr32 imm32 gdi32 gdiplus user32 msvcrt kernel32 ntdll)
 add_pch(user32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET user32_apitest)
 
@@ -179,6 +193,12 @@ set_module_type(user32_apitest_fghide win32gui UNICODE)
 add_importlibs(user32_apitest_fghide user32 msvcrt kernel32)
 add_rostests_file(TARGET user32_apitest_fghide)
 add_dependencies(user32_apitest user32_apitest_fghide)
+
+add_executable(user32_apitest_fglaunch user32_apitest_fglaunch.c)
+set_module_type(user32_apitest_fglaunch win32gui UNICODE)
+add_importlibs(user32_apitest_fglaunch user32 msvcrt kernel32)
+add_rostests_file(TARGET user32_apitest_fglaunch)
+add_dependencies(user32_apitest user32_apitest_fglaunch)
 
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest1.manifest")
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest2.manifest")

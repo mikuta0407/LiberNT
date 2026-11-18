@@ -5,6 +5,7 @@ extern PUSER_MESSAGE_QUEUE gpqForegroundPrev;
 extern HWND ghwndForeground;
 extern HWND ghwndForegroundPrev;
 extern PTHREADINFO ptiLastInput;
+extern PPROCESSINFO gppiLastInput;
 
 /*
  * These functions take the window handles from current message queue.
@@ -35,6 +36,7 @@ VOID FASTCALL IntActivateWindow(PWND,PTHREADINFO,HANDLE,DWORD);
 BOOL FASTCALL IntDeactivateWindow(PTHREADINFO,HANDLE);
 BOOL FASTCALL co_IntSetForegroundMessageQueue(PWND,PTHREADINFO,BOOL,BOOL );
 VOID FASTCALL IntSetForegroundThread(PTHREADINFO);
+VOID FASTCALL IntSetInputDesktopForeground(PDESKTOP);
 VOID FASTCALL UpdateShellHook(PWND);
 BOOL FASTCALL IntCheckFullscreen(PWND Window);
 VOID FASTCALL co_IntUpdateFullscreenState(PWND Window);

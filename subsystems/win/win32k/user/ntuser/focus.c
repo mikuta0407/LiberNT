@@ -19,6 +19,7 @@ PTHREADINFO gptiForeground = NULL;
 PPROCESSINFO gppiLockSFW = NULL;
 ULONG guSFWLockCount = 0; // Rule #8, No menus are active. So should be zero.
 PTHREADINFO ptiLastInput = NULL;
+PPROCESSINFO gppiLastInput = NULL;
 HWND ghwndOldFullscreen = NULL;
 
 static VOID FASTCALL
@@ -76,6 +77,33 @@ IntSetForegroundThread(PTHREADINFO pti)
    }
 
    gptiForeground = pti;
+}
+
+VOID FASTCALL
+IntSetInputDesktopForeground(
+   _In_ PDESKTOP pdesk)
+{
+   PUSER_MESSAGE_QUEUE Queue = pdesk->ActiveMessageQueue;
+   PWND Wnd = NULL;
+   MSG Msg;
+
+   gpqForeground = Queue;
+   if (Queue)
+   {
+      Wnd = Queue->spwndActive ? Queue->spwndActive : VerifyWnd(Queue->spwndActivePrev);
+      if (Wnd && (Wnd->head.rpdesk != pdesk || (Wnd->style & (WS_VISIBLE | WS_DISABLED)) != WS_VISIBLE))
+         Wnd = NULL;
+   }
+   IntSetForegroundThread(Wnd ? Wnd->head.pti : NULL);
+   if (!Wnd || Queue->spwndActive)
+      return;
+
+   Msg.message = WM_ASYNC_SETACTIVEWINDOW;
+   Msg.hwnd = UserHMGetHandle(Wnd);
+   Msg.wParam = (WPARAM)Wnd;
+   Msg.lParam = 0;
+   Msg.time = 0;
+   MsqPostMessage(Wnd->head.pti, &Msg, FALSE, QS_EVENT, POSTEVENT_SAW, (LONG_PTR)FALSE);
 }
 
 /*
@@ -1885,7 +1913,7 @@ IntCanStartForeground(PEPROCESS Process)
 
    if (ppi &&
        (gptiForeground->ppi == ppi ||
-        (ptiLastInput && ptiLastInput->ppi == ppi) ||
+        gppiLastInput == ppi ||
         gppiInputProvider == ppi ||
         (ppi->W32PF_flags & (W32PF_ALLOWFOREGROUNDACTIVATE | W32PF_CONSOLEFOREGROUND))))
    {

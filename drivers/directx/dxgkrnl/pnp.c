@@ -829,9 +829,11 @@ DxgkDispatchPnp(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp)
 {
+    NTSTATUS DisplayStatus;
+
     /* Route \Device\Video0 PnP IRPs to the display handler */
-    if (DxgkDisplayDispatchPnp(DeviceObject, Irp))
-        return STATUS_SUCCESS;
+    if (DxgkDisplayDispatchPnp(DeviceObject, Irp, &DisplayStatus))
+        return DisplayStatus;
 
     DXGKRNL_TRACE("DxgkDispatchPnp: MinorFunction=%u\n",
                   IoGetCurrentIrpStackLocation(Irp)->MinorFunction);
@@ -933,6 +935,16 @@ DxgkpChildReportable(
     if (!Child->Present || Child->EnumerationEpoch != ExpectedEpoch)
         return FALSE;
     return Child->Descriptor.ChildDeviceType != TypeVideoOutput || Child->Connected;
+}
+
+static BOOLEAN
+DxgkpChildWithheld(
+    _Inout_ PDXGK_CHILD_PDO_EXTENSION Child)
+{
+    /* A monitor that came back before the PnP manager saw it go leaves before its new device arrives */
+    if (Child->Reported && Child->Connected && Child->ConnectSequence != Child->ReportedConnectSequence)
+        Child->ReconnectPending = TRUE;
+    return Child->ReconnectPending;
 }
 
 static BOOLEAN
@@ -1880,7 +1892,7 @@ DxgkpQueryBusRelations(
         {
             PDXGK_CHILD_PDO_EXTENSION Child =
                 CONTAINING_RECORD(Entry, DXGK_CHILD_PDO_EXTENSION, ListEntry);
-            if (DxgkpChildReportable(Child, ExpectedEpoch) && Child->DeviceObject != NULL)
+            if (DxgkpChildReportable(Child, ExpectedEpoch) && Child->DeviceObject != NULL && !DxgkpChildWithheld(Child))
                 Count++;
         }
         KeReleaseSpinLock(&Adapter->ChildListLock, OldIrql);
@@ -1918,12 +1930,19 @@ DxgkpQueryBusRelations(
         {
             PDXGK_CHILD_PDO_EXTENSION Child =
                 CONTAINING_RECORD(Entry, DXGK_CHILD_PDO_EXTENSION, ListEntry);
+            if (DxgkpChildWithheld(Child))
+            {
+                Child->Reported = FALSE;
+                continue;
+            }
             Child->Reported = FALSE;
             if (Idx < Count && DxgkpChildReportable(Child, ExpectedEpoch) && Child->DeviceObject != NULL)
             {
                 Rel->Objects[Idx] = Child->DeviceObject;
                 ObReferenceObject(Child->DeviceObject);
+                ASSERT(!Child->ReconnectPending);
                 Child->Reported = TRUE;
+                Child->ReportedConnectSequence = Child->ConnectSequence;
                 Idx++;
             }
         }
@@ -2445,6 +2464,7 @@ DxgkpChildPdoPnpDispatch(
                           ChildExt->Descriptor.ChildUid);
 
             BOOLEAN Delete = TRUE;
+            BOOLEAN Reconnect = FALSE;
 
             DxgkpChildWithdrawMonitor(DeviceObject);
             if (ChildExt->ParentAdapter != NULL)
@@ -2452,15 +2472,24 @@ DxgkpChildPdoPnpDispatch(
                 KIRQL OldIrql;
                 KeAcquireSpinLock(&ChildExt->ParentAdapter->ChildListLock,
                                   &OldIrql);
+                ASSERT(!(ChildExt->Reported && ChildExt->ReconnectPending));
                 if (ChildExt->DeviceObject == DeviceObject)
                 {
                     if (ChildExt->Reported)
+                    {
                         Delete = FALSE;
+                    }
                     else
+                    {
                         ChildExt->DeviceObject = NULL;
+                        Reconnect = ChildExt->ReconnectPending;
+                        ChildExt->ReconnectPending = FALSE;
+                    }
                 }
                 KeReleaseSpinLock(&ChildExt->ParentAdapter->ChildListLock,
                                   OldIrql);
+                if (Reconnect)
+                    IoInvalidateDeviceRelations(ChildExt->ParentAdapter->PhysicalDeviceObject, BusRelations);
             }
 
             Status = STATUS_SUCCESS;

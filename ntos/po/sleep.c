@@ -664,6 +664,8 @@ PopEnterConsoleSession(
     ULONG ConsoleId = RtlGetActiveConsoleId();
 
     *Session = NULL;
+    if (ConsoleId == MAXULONG)
+        return FALSE;
     if (PsGetProcessSessionIdEx(PsGetCurrentProcess()) == ConsoleId)
         return TRUE;
 

@@ -884,6 +884,20 @@ DwmPointerLoadImage(HDC hdcScreen, HCURSOR Cursor, ULONG Step)
     return Ok;
 }
 
+static BOOL
+DwmPrimaryOutputChanged(WCHAR *LastDevice)
+{
+    MONITORINFOEXW Info;
+
+    ZeroMemory(&Info, sizeof(Info));
+    Info.cbSize = sizeof(Info);
+    if (!GetMonitorInfoW(MonitorFromPoint((POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), (MONITORINFO *)&Info) ||
+        !lstrcmpiW(Info.szDevice, LastDevice))
+        return FALSE;
+    lstrcpynW(LastDevice, Info.szDevice, CCHDEVICENAME);
+    return TRUE;
+}
+
 /* TRUE when the pointer differs from what the last frame drew. */
 static BOOL
 DwmPointerUpdate(HDC hdcScreen, const DWM_FRAME_HEADER *Frame)
@@ -4191,6 +4205,7 @@ DwmComposeLoop(HANDLE hStopEvent)
     DWORD gpuLastOutputCheck = 0;
     DWORD gpuRetryLast = GetTickCount();
     ULONG gpuRetryFailures = 0;
+    WCHAR primaryOutput[CCHDEVICENAME] = L"";
     LONG vw, vh, primW, primH;
     ULONG ViewIndex;
 
@@ -4469,6 +4484,25 @@ DwmComposeLoop(HANDLE hStopEvent)
             continue;
         }
 
+        if (DwmPrimaryOutputChanged(primaryOutput))
+        {
+            if (DwmGpuComposeOutputMoved())
+            {
+                DwmGpuComposeShutdown();
+                DwmLog("DWM: the desktop moved to an output the Direct3D compositor does not scan out\n");
+            }
+            gpuRetryFailures = 0;
+            gpuRetryLast = GetTickCount();
+            if (!DwmGpuComposeIsActive() && DwmGpuComposeInitialize(g_W, g_H))
+                DwmLog("DWM: native Direct3D compositor available on the new output\n");
+            g_lastFrameQpc = 0;
+            forceFull = TRUE;
+            g_pointer.GpuActive = FALSE;
+            screenCaptureProbes = 0;
+            screenMirrorNeeded = 0;
+            continue;
+        }
+
         pointerChanged = DwmPointerUpdate(hdcScreen, hdr);
         screenRead = hdr->ScreenReadRequest;
         if (hdr->Dirty == 0 && !forceFull && !pointerChanged && screenRead == 0)
@@ -4610,7 +4644,7 @@ DwmComposeLoop(HANDLE hStopEvent)
                     DPT_SCOPE FrameTrace = DptBegin(&g_DwmPresentTrace, DPT_FRAME);
                     DPT_SCOPE AckTrace;
                     ULONGLONG TraceDrawStart = 0, TraceDrawEnd = 0, TracePresentEnd = 0;
-                    BOOL gpuFrame;
+                    BOOL gpuFrame, gpuStale = FALSE;
                     DWM_GPU_RESULT gpuResult;
                     RECT gpuDamage[ARRAYSIZE(damageParts)] = {{pl, pt, pr, pb}};
                     ULONG gpuDamageCount = 1;
@@ -4645,8 +4679,17 @@ DwmComposeLoop(HANDLE hStopEvent)
 
                         /* Submit the scene in order. Begin's scissor limits
                          * raster work to the repaired buffer region. */
-                        gpix = DwmGpuComposeNeedsSurfacePixels(&wins[i]) ?
-                                   DwmGetSurfaceView(&wins[i]) : NULL;
+                        gpix = NULL;
+                        if (DwmGpuComposeNeedsSurfacePixels(&wins[i]))
+                        {
+                            gpix = DwmGetSurfaceView(&wins[i]);
+                            if (gpix == NULL)
+                            {
+                                gpuStale = TRUE;
+                                gpuFrame = FALSE;
+                                break;
+                            }
+                        }
                         DwmGpuComposePrepareWindow(&wins[i], i);
                         if (wins[i].BlurRectBase > hdr->BlurRectCount ||
                             wins[i].BlurRectCount > hdr->BlurRectCount - wins[i].BlurRectBase)
@@ -4696,7 +4739,8 @@ DwmComposeLoop(HANDLE hStopEvent)
                         DptEnd(&g_DwmPresentTrace, AckTrace, TRUE, 0);
                     }
 
-                    gpuResult = gpuFrame ? DwmGpuComposeEnd() : DwmGpuComposeAbort();
+                    gpuResult = gpuFrame ? DwmGpuComposeEnd() :
+                                gpuStale ? DwmGpuComposeRetry() : DwmGpuComposeAbort();
                     if (FrameTrace.Epoch) TracePresentEnd = DptNow();
                     if (gpuResult == DWM_GPU_COMPLETE ||
                         gpuResult == DWM_GPU_DEFERRED)
