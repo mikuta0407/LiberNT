@@ -4594,6 +4594,7 @@ DwmComposeLoop(HANDLE hStopEvent)
             DispatchMessageW(&message);
         }
 
+        DwmSettingsUpdateRemote(&Settings);
         if (Settings.Changed)
         {
             /* A preference change can expose pixels outside ordinary

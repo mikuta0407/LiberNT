@@ -21,6 +21,7 @@ extern void func_mode_switch(void);
 extern void func_monitor_power(void);
 extern void func_own_caption_bounds(void);
 extern void func_pointer_image(void);
+extern void func_remote_materials(void);
 extern void func_scene_cache(void);
 
 const struct test winetest_testlist[] =
@@ -36,6 +37,7 @@ const struct test winetest_testlist[] =
     { "monitor_power", func_monitor_power },
     { "own_caption_bounds", func_own_caption_bounds },
     { "pointer_image", func_pointer_image },
+    { "remote_materials", func_remote_materials },
     { "scene_cache", func_scene_cache },
     { "dwm_restart", func_dwm_restart },
     { 0, 0 }
