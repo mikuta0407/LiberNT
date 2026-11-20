@@ -604,7 +604,7 @@ DisconnectRemote(
             NotifyWindows(WTS_SESSION_LOCK);
         NotifyServices(WTS_SESSION_LOCK, RemoteSessionId);
     }
-    else if (!bLocked)
+    else if (Session->LogonState == STATE_LOGGED_ON || Session->LogonState == STATE_LOGGED_ON_SAS)
     {
         Session->LogonState = STATE_LOCKED;
         SwitchDesktop(Session->WinlogonDesktop);
