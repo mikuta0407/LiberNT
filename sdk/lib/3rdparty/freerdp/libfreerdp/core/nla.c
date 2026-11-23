@@ -1199,7 +1199,7 @@ static BOOL set_creds_octetstring_to_settings(WinPrAsn1Decoder* dec, WinPrAsn1_t
 	const BOOL rc = freerdp_settings_set_string_from_utf16N(
 	    settings, settingId, WINPR_PACKED_ALIGN_CAST(const WCHAR*, value.data),
 	    value.len / sizeof(WCHAR));
-	free(value.data);
+	winpr_znfree(value.data, value.len);
 	return rc;
 }
 
