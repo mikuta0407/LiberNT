@@ -94,9 +94,9 @@ RdpTestStart(PRDP_TEST_SETUP Setup)
     WSADATA Data;
 
     ZeroMemory(Setup, sizeof(*Setup));
-    if (!ServiceRunning(L"LiberNTRDPServer"))
+    if (!ServiceRunning(L"LiberNTRDPServer") && !ServiceRunning(L"TermService"))
     {
-        skip("The LiberNT Remote Desktop server is not running\n");
+        skip("No Remote Desktop server is running\n");
         return FALSE;
     }
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TERMINAL_SERVER_KEY, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &Setup->Key))
@@ -211,6 +211,7 @@ ClientThread(PVOID Parameter)
                 !freerdp_check_event_handles(Instance->context) || freerdp_shall_disconnect_context(Instance->context))
             {
                 Client->Error = freerdp_get_last_error(Instance->context);
+                Client->ErrorInfo = freerdp_error_info(Instance);
                 InterlockedExchange(&Client->Disconnected, TRUE);
                 break;
             }

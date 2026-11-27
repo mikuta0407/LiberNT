@@ -978,7 +978,7 @@ static void ContextFree(freerdp_peer *peer, rdpContext *rdp)
 static BOOL Disconnected(DESKTOP_CONTEXT *ctx, const char *reason)
 {
     Log("Peer %s %s", ctx->rdp.peer->hostname, reason);
-    freerdp_set_error_info(ctx->rdp.rdp, ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION);
+    freerdp_set_error_info(ctx->rdp.rdp, ERRINFO_RPC_INITIATED_DISCONNECT);
     if (!freerdp_send_error_info(ctx->rdp.rdp)) Log("Cannot tell peer %s why it is disconnected", ctx->rdp.peer->hostname);
     return TRUE;
 }
