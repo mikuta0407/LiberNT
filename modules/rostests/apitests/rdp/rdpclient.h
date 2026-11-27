@@ -19,6 +19,7 @@ typedef struct _RDP_CLIENT
     volatile LONG Alive;
     volatile LONG Disconnected;
     UINT32 Error;
+    UINT32 ErrorInfo;
 } RDP_CLIENT, *PRDP_CLIENT;
 
 typedef struct _RDP_TEST_SETUP
